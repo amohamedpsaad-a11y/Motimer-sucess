@@ -24,7 +24,10 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return new Response(null, {
+        status: 204,
+        headers: CORS_HEADERS,
+      });
     }
 
     if (url.pathname === "/subscription-status") {
@@ -32,81 +35,150 @@ export default {
     }
 
     if (url.pathname !== "/success") {
-      return htmlResponse(renderError("Not found."), 404);
+      return htmlResponse(
+        renderError("Not found."),
+        404
+      );
     }
 
-    const checkoutId = String(url.searchParams.get("checkout_id") || "").trim();
+    const checkoutId = String(
+      url.searchParams.get("checkout_id") || ""
+    ).trim();
 
-    if (!checkoutId || checkoutId === "{CHECKOUT_ID}") {
-      return htmlResponse(renderError("Missing checkout information."), 400);
+    if (
+      !checkoutId ||
+      checkoutId === "{CHECKOUT_ID}"
+    ) {
+      return htmlResponse(
+        renderError("Missing checkout information."),
+        400
+      );
     }
 
     try {
-      const checkout = await polarGet(env, `/v1/checkouts/${encodeURIComponent(checkoutId)}`);
+      const checkout = await polarGet(
+        env,
+        `/v1/checkouts/${encodeURIComponent(checkoutId)}`
+      );
 
       if (!checkout?.customer_id) {
         return htmlResponse(
-          renderError("We couldn't find your customer information yet. Please refresh this page in a few seconds."),
+          renderError(
+            "We couldn't find your customer information yet. Please refresh this page in a few seconds."
+          ),
           200
         );
       }
 
       // SOURCE OF TRUTH FOR ACTIVATION.
       // We never search for or require a Polar license key.
-      const customerId = String(checkout.customer_id);
+      const customerId = String(
+        checkout.customer_id
+      );
 
       let subscription = null;
       let lookupError = "";
 
-      // Best path: the successful checkout can point directly at its subscription.
+      // Best path: successful checkout can point directly to subscription.
       if (checkout.subscription_id) {
         try {
           subscription = await polarGet(
             env,
-            `/v1/subscriptions/${encodeURIComponent(checkout.subscription_id)}`
+            `/v1/subscriptions/${encodeURIComponent(
+              checkout.subscription_id
+            )}`
           );
         } catch (err) {
-          lookupError = String(err?.message || err || "subscription lookup failed");
+          lookupError = String(
+            err?.message ||
+            err ||
+            "subscription lookup failed"
+          );
         }
       }
 
-      // Fallback: find the customer's subscription if the checkout does not expose
-      // a subscription id yet, or the direct lookup failed.
+      // Fallback: find customer's subscription.
       if (!subscription) {
         try {
-          subscription = await findSubscription(env, customerId);
+          subscription = await findSubscription(
+            env,
+            customerId
+          );
         } catch (err) {
-          lookupError = String(err?.message || err || "subscription lookup failed");
+          lookupError = String(
+            err?.message ||
+            err ||
+            "subscription lookup failed"
+          );
         }
       }
 
-      const validUntil = String(subscription?.current_period_end || "");
-      const polarStatus = String(subscription?.status || "");
-      const active = isEntitledStatus(polarStatus) && !!validUntil;
+      const validUntil = String(
+        subscription?.current_period_end || ""
+      );
+
+      const polarStatus = String(
+        subscription?.status || ""
+      );
+
+      const active =
+        isEntitledStatus(polarStatus) &&
+        !!validUntil;
 
       return htmlResponse(
-        renderSuccess(customerId, validUntil, polarStatus, active, lookupError),
+        renderSuccess(
+          customerId,
+          validUntil,
+          polarStatus,
+          active,
+          lookupError
+        ),
         200
       );
+
     } catch (err) {
       return htmlResponse(
-        renderError("Something went wrong looking up your order: " + String(err?.message || err)),
+        renderError(
+          "Something went wrong looking up your order: " +
+          String(
+            err?.message || err
+          )
+        ),
         500
       );
     }
   },
 };
 
-// ---- Subscription status endpoint ----
-async function handleSubscriptionStatus(url, env) {
-  const customerId = String(url.searchParams.get("customer_id") || "").trim();
+
+// =========================================================
+// Subscription status endpoint
+// =========================================================
+
+async function handleSubscriptionStatus(
+  url,
+  env
+) {
+  const customerId = String(
+    url.searchParams.get("customer_id") || ""
+  ).trim();
 
   if (!customerId) {
-    return jsonResponse({ ok: false, error: "missing customer_id" }, 400);
+    return jsonResponse(
+      {
+        ok: false,
+        error: "missing customer_id",
+      },
+      400
+    );
   }
 
   try {
-    const subscription = await findSubscription(env, customerId);
+    const subscription =
+      await findSubscription(
+        env,
+        customerId
+      );
 
     if (!subscription) {
       return jsonResponse({
@@ -118,209 +190,592 @@ async function handleSubscriptionStatus(url, env) {
       });
     }
 
-    const polarStatus = String(subscription.status || "");
-    const validUntil = String(subscription.current_period_end || "");
-    const active = isEntitledStatus(polarStatus) && !!validUntil;
+    const polarStatus = String(
+      subscription.status || ""
+    );
+
+    const validUntil = String(
+      subscription.current_period_end || ""
+    );
+
+    const active =
+      isEntitledStatus(polarStatus) &&
+      !!validUntil;
 
     return jsonResponse({
       ok: true,
-      status: active ? "Active" : "Not subscribed",
+
+      status: active
+        ? "Active"
+        : "Not subscribed",
+
       validUntil,
-      subscriptionId: String(subscription.id || ""),
+
+      subscriptionId:
+        String(
+          subscription.id || ""
+        ),
+
       polarStatus,
     });
+
   } catch (err) {
-    // Do NOT hide the Polar error. The extension can retry, and this makes
-    // Cloudflare's response useful for diagnosing token/query problems.
+
+    // Do NOT hide Polar errors.
     return jsonResponse(
       {
         ok: false,
-        error: String(err?.message || err || "subscription lookup failed"),
+
+        error: String(
+          err?.message ||
+          err ||
+          "subscription lookup failed"
+        ),
       },
       500
     );
   }
 }
 
+
+// =========================================================
+// Subscription helpers
+// =========================================================
+
 function isEntitledStatus(status) {
-  return status === "active" || status === "trialing";
+  return (
+    status === "active" ||
+    status === "trialing"
+  );
 }
 
-async function findSubscription(env, customerId) {
+
+async function findSubscription(
+  env,
+  customerId
+) {
   const data = await polarGet(
     env,
-    `/v1/subscriptions/?organization_id=${encodeURIComponent(POLAR_ORG_ID)}&customer_id=${encodeURIComponent(customerId)}&active=true&sorting=-current_period_end&limit=10`
+
+    `/v1/subscriptions/?organization_id=${encodeURIComponent(
+      POLAR_ORG_ID
+    )}&customer_id=${encodeURIComponent(
+      customerId
+    )}&active=true&sorting=-current_period_end&limit=10`
   );
 
-  const items = Array.isArray(data?.items) ? data.items : [];
+  const items =
+    Array.isArray(data?.items)
+      ? data.items
+      : [];
 
   return (
-    items.find((sub) => isEntitledStatus(String(sub?.status || ""))) ||
+    items.find(
+      sub =>
+        isEntitledStatus(
+          String(
+            sub?.status || ""
+          )
+        )
+    ) ||
+
     items[0] ||
+
     null
   );
 }
 
-async function polarGet(env, path) {
-  const token = String(env?.POLAR_API_TOKEN || "").trim();
+
+// =========================================================
+// Polar API
+// =========================================================
+
+async function polarGet(
+  env,
+  path
+) {
+  const token =
+    String(
+      env?.POLAR_API_TOKEN || ""
+    ).trim();
 
   if (!token) {
-    throw new Error("POLAR_API_TOKEN is not configured in Worker secrets");
+    throw new Error(
+      "POLAR_API_TOKEN is not configured in Worker secrets"
+    );
   }
 
-  const res = await fetch(`https://api.polar.sh${path}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
+  const res = await fetch(
+    `https://api.polar.sh${path}`,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${token}`,
 
-  const text = await res.text();
+        Accept:
+          "application/json",
+      },
+    }
+  );
+
+  const text =
+    await res.text();
 
   if (!res.ok) {
+
     let detail = text;
+
     try {
-      const parsed = JSON.parse(text);
-      detail = parsed?.detail || parsed?.message || text;
+      const parsed =
+        JSON.parse(text);
+
+      detail =
+        parsed?.detail ||
+        parsed?.message ||
+        text;
+
     } catch (_) {}
 
-    throw new Error(`Polar API ${path} -> ${res.status}: ${detail}`);
+    throw new Error(
+      `Polar API ${path} -> ${res.status}: ${detail}`
+    );
   }
 
   try {
+
     return JSON.parse(text);
+
   } catch (_) {
-    throw new Error(`Polar API ${path} returned invalid JSON`);
+
+    throw new Error(
+      `Polar API ${path} returned invalid JSON`
+    );
   }
 }
 
-function htmlResponse(body, status) {
-  return new Response(body, {
-    status,
-    headers: { "content-type": "text/html; charset=utf-8" },
-  });
+
+// =========================================================
+// Responses
+// =========================================================
+
+function htmlResponse(
+  body,
+  status
+) {
+  return new Response(
+    body,
+    {
+      status,
+
+      headers: {
+        "content-type":
+          "text/html; charset=utf-8",
+      },
+    }
+  );
 }
 
-function jsonResponse(obj, status = 200) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      ...CORS_HEADERS,
-    },
-  });
+
+function jsonResponse(
+  obj,
+  status = 200
+) {
+  return new Response(
+    JSON.stringify(obj),
+    {
+      status,
+
+      headers: {
+        "content-type":
+          "application/json; charset=utf-8",
+
+        ...CORS_HEADERS,
+      },
+    }
+  );
 }
 
-function renderError(message) {
+
+// =========================================================
+// Error page
+// =========================================================
+
+function renderError(
+  message
+) {
   return `<!doctype html>
 <html>
+
 <head>
 <meta charset="utf-8">
 <title>Motimer</title>
+
 <style>
-body{font-family:system-ui,Arial,sans-serif;background:#0a0a0a;color:#eee;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-.card{max-width:440px;text-align:center;padding:32px;background:#151515;border-radius:12px}
+
+body{
+  font-family:
+    system-ui,
+    Arial,
+    sans-serif;
+
+  background:#0a0a0a;
+  color:#eee;
+
+  display:flex;
+  align-items:center;
+  justify-content:center;
+
+  height:100vh;
+  margin:0;
+}
+
+.card{
+  max-width:440px;
+  text-align:center;
+  padding:32px;
+
+  background:#151515;
+  border-radius:12px;
+}
+
 </style>
 </head>
+
 <body>
+
 <div class="card">
+
 <h2>Motimer</h2>
-<p>${escapeHtml(message)}</p>
+
+<p>
+${escapeHtml(message)}
+</p>
+
 </div>
+
 </body>
 </html>`;
 }
 
-function renderSuccess(customerId, validUntil, polarStatus, active, lookupError) {
-  const safeCustomerId = escapeHtml(customerId || "");
-  const safeValidUntil = escapeHtml(validUntil || "");
-  const safePolarStatus = escapeHtml(polarStatus || "");
-  const safeLookupError = escapeHtml(lookupError || "");
+
+// =========================================================
+// Success page
+// =========================================================
+
+function renderSuccess(
+  customerId,
+  validUntil,
+  polarStatus,
+  active,
+  lookupError
+) {
+
+  const safeCustomerId =
+    escapeHtml(
+      customerId || ""
+    );
+
+  const safeValidUntil =
+    escapeHtml(
+      validUntil || ""
+    );
+
+  const safePolarStatus =
+    escapeHtml(
+      polarStatus || ""
+    );
+
+  const safeLookupError =
+    escapeHtml(
+      lookupError || ""
+    );
 
   return `<!doctype html>
+
 <html>
+
 <head>
+
 <meta charset="utf-8">
-<title>Thank you — Motimer</title>
+
+<title>
+Thank you — Motimer
+</title>
+
 <style>
-body{font-family:system-ui,Arial,sans-serif;background:#0a0a0a;color:#eee;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-.card{max-width:460px;text-align:center;padding:32px;background:#151515;border-radius:12px}
-button{background:#fff;color:#000;border:0;border-radius:8px;padding:12px 22px;font-size:15px;cursor:pointer;margin-top:16px}
-button:disabled{opacity:.6;cursor:default}
-.status{margin-top:14px;font-size:14px;color:#aaa}
-code{display:block;margin-top:14px;font-size:12px;color:#777;word-break:break-all}
-.debug{display:none}
+
+body{
+  font-family:
+    system-ui,
+    Arial,
+    sans-serif;
+
+  background:#0a0a0a;
+  color:#eee;
+
+  display:flex;
+  align-items:center;
+  justify-content:center;
+
+  height:100vh;
+  margin:0;
+}
+
+.card{
+  max-width:460px;
+  text-align:center;
+
+  padding:32px;
+
+  background:#151515;
+
+  border-radius:12px;
+}
+
+button{
+  background:#fff;
+  color:#000;
+
+  border:0;
+
+  border-radius:8px;
+
+  padding:12px 22px;
+
+  font-size:15px;
+
+  cursor:pointer;
+
+  margin-top:16px;
+}
+
+button:disabled{
+  opacity:.6;
+  cursor:default;
+}
+
+.status{
+  margin-top:14px;
+  font-size:14px;
+  color:#aaa;
+}
+
+code{
+  display:block;
+
+  margin-top:14px;
+
+  font-size:12px;
+
+  color:#777;
+
+  word-break:break-all;
+}
+
+.debug{
+  display:none;
+}
+
 </style>
+
 </head>
+
 <body>
+
 <div class="card">
-<h2>Thank you for your purchase! 🎉</h2>
-<p>Click below to activate Motimer in this browser.</p>
-<button id="activateBtn">Activate Motimer</button>
-<div class="status" id="statusMsg"></div>
-<code>Customer ID: ${safeCustomerId}</code>
-<div class="debug" id="debug" data-status="${safePolarStatus}" data-active="${active ? "1" : "0"}" data-error="${safeLookupError}"></div>
+
+<h2>
+Thank you for your purchase! 🎉
+</h2>
+
+<p>
+Click below to activate Motimer in this browser.
+</p>
+
+<button id="activateBtn">
+Activate Motimer
+</button>
+
+<div
+  class="status"
+  id="statusMsg"
+></div>
+
+<code>
+Customer ID:
+${safeCustomerId}
+</code>
+
+<div
+  class="debug"
+  id="debug"
+  data-status="${safePolarStatus}"
+  data-active="${active ? "1" : "0"}"
+  data-error="${safeLookupError}"
+></div>
+
 </div>
+
+
 <script>
-const EXTENSION_ID = "${EXTENSION_ID}";
-const CUSTOMER_ID = ${JSON.stringify(customerId || "")};
-const VALID_UNTIL = ${JSON.stringify(validUntil || "")};
-const INITIAL_ACTIVE = ${active ? "true" : "false"};
 
-const btn = document.getElementById("activateBtn");
-const statusEl = document.getElementById("statusMsg");
+const EXTENSION_ID =
+  "${EXTENSION_ID}";
 
-btn.addEventListener("click", () => {
-  btn.disabled = true;
-  statusEl.textContent = "Activating…";
+const CUSTOMER_ID =
+  ${JSON.stringify(
+    customerId || ""
+  )};
 
-  if (!window.chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
-    statusEl.textContent = "Please open this page in Chrome with Motimer installed.";
-    btn.disabled = false;
-    return;
-  }
+const VALID_UNTIL =
+  ${JSON.stringify(
+    validUntil || ""
+  )};
 
-  chrome.runtime.sendMessage(
-    EXTENSION_ID,
-    {
-      type: "MOTIMER_ACTIVATE_LICENSE",
-      customerId: CUSTOMER_ID,
-      validUntil: VALID_UNTIL
-    },
-    (response) => {
-      if (chrome.runtime.lastError) {
-        statusEl.textContent = "Couldn't reach the extension. Is Motimer installed?";
-        btn.disabled = false;
-        return;
-      }
+const INITIAL_ACTIVE =
+  ${active ? "true" : "false"};
 
-      if (response && response.ok) {
-        if (response.status === "active") {
-          statusEl.textContent = "Activated! You can close this tab.";
-          btn.textContent = "Activated ✓";
-        } else {
-          statusEl.textContent = "Payment received. Waiting for Polar to finish the subscription…";
-          btn.textContent = "Waiting for subscription…";
-          btn.disabled = true;
-        }
-      } else {
-        statusEl.textContent = (response && response.error) || "Activation failed.";
-        btn.disabled = false;
-      }
-    }
+
+const btn =
+  document.getElementById(
+    "activateBtn"
   );
-});
+
+const statusEl =
+  document.getElementById(
+    "statusMsg"
+  );
+
+
+btn.addEventListener(
+  "click",
+  () => {
+
+    btn.disabled = true;
+
+    statusEl.textContent =
+      "Activating…";
+
+
+    if (
+      !window.chrome ||
+      !chrome.runtime ||
+      !chrome.runtime.sendMessage
+    ) {
+
+      statusEl.textContent =
+        "Please open this page in Chrome with Motimer installed.";
+
+      btn.disabled = false;
+
+      return;
+    }
+
+
+    chrome.runtime.sendMessage(
+      EXTENSION_ID,
+
+      {
+        type:
+          "MOTIMER_ACTIVATE_LICENSE",
+
+        customerId:
+          CUSTOMER_ID,
+
+        validUntil:
+          VALID_UNTIL
+      },
+
+      (response) => {
+
+        if (
+          chrome.runtime.lastError
+        ) {
+
+          statusEl.textContent =
+            "Couldn't reach the extension. Is Motimer installed?";
+
+          btn.disabled = false;
+
+          return;
+        }
+
+
+        if (
+          response &&
+          response.ok
+        ) {
+
+          if (
+            response.status ===
+            "active"
+          ) {
+
+            statusEl.textContent =
+              "Activated! You can close this tab.";
+
+            btn.textContent =
+              "Activated ✓";
+
+          } else {
+
+            statusEl.textContent =
+              "Payment received. Waiting for Polar to finish the subscription…";
+
+            btn.textContent =
+              "Waiting for subscription…";
+
+            btn.disabled = true;
+          }
+
+        } else {
+
+          statusEl.textContent =
+            (
+              response &&
+              response.error
+            ) ||
+            "Activation failed.";
+
+          btn.disabled = false;
+        }
+      }
+    );
+  }
+);
+
 </script>
+
 </body>
+
 </html>`;
 }
 
+
+// =========================================================
+// Escape HTML
+// =========================================================
+
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[c]));
+
+  return String(s).replace(
+    /[&<>"']/g,
+
+    (c) => ({
+      "&":
+        "&amp;",
+
+      "<":
+        "&lt;",
+
+      ">":
+        "&gt;",
+
+      '"':
+        "&quot;",
+
+      "'":
+        "&#39;",
+    }[c])
+  );
 }
