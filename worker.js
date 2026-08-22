@@ -26,7 +26,7 @@
 //   5. In Polar, edit the "Motimer - Main Checkout" link -> Success URL:
 //      https://motimer.online/success?checkout_id={CHECKOUT_ID}
 
-const EXTENSION_ID = "iciodmffjmfgemjdeaaeppppbohfgdng";
+const EXTENSION_ID = "aniinmakekcefcjkmlgkhmmfdghfngge";
 
 export default {
   async fetch(request, env) {
