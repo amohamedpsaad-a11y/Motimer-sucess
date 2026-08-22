@@ -43,7 +43,7 @@
 // failed with "Couldn't reach the extension." If your real installed/published
 // extension ID is ever different from the value below, update BOTH this file
 // and motimer_config.js to match it — never just one side.
-const EXTENSION_ID = "ioiabhfekaoapjkfeleldaehmniplbdo";
+const EXTENSION_ID = "piebckhemoefjllcoickopkclpaieelh";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
