@@ -30,7 +30,7 @@
 
 // IMPORTANT: this must be the EXACT same ID as MOTIMER_EXTENSION_ID in the
 // extension's motimer_config.js.
-const EXTENSION_ID = "laabndpmcdhpkohikigfabfkekgpndgk";
+const EXTENSION_ID = "khebedhibkofbjfnkojdglimebnmmppl";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
