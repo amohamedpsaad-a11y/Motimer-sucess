@@ -1,5 +1,7 @@
 name = "motimer-sucess"
 main = "worker.js"
 compatibility_date = "2024-01-01"
-[vars]
-POLAR_ORG_ID = "0e4771fb-1ab4-41d6-a759-4362e4643bc7"
+
+[[kv_namespaces]]
+binding = "MOTIMER_KV"
+id = "PUT_YOUR_KV_NAMESPACE_ID_HERE"
