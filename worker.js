@@ -33,7 +33,17 @@
 // 5. In Polar, edit the "Motimer - Main Checkout" link -> Success URL:
 //    https://motimer.online/success?checkout_id={CHECKOUT_ID}
 
-const EXTENSION_ID = "aniinmakekcefcjkmlgkhmmfdghfngge";
+// IMPORTANT: this must be the EXACT same ID as MOTIMER_EXTENSION_ID in the
+// extension's motimer_config.js (it in turn must match what's registered as
+// the OAuth client's extension ID in Google Cloud Console — see the comment
+// there). It was previously out of sync with the extension
+// (aniinmakekcefcjkmlgkhmmfdghfngge vs iciodmffjmfgemjdeaaeppppbohfgdng),
+// which silently broke the whole "Activate Motimer" button: the browser had
+// no extension listening at that ID, so chrome.runtime.sendMessage always
+// failed with "Couldn't reach the extension." If your real installed/published
+// extension ID is ever different from the value below, update BOTH this file
+// and motimer_config.js to match it — never just one side.
+const EXTENSION_ID = "laabndpmcdhpkohikigfabfkekgpndgk";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
