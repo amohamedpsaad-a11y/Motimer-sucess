@@ -10,7 +10,7 @@
 //    No Polar license key lookup is used anywhere.
 // 5. /subscription-status?customer_id=... is used by the extension for refresh.
 
-const EXTENSION_ID = "dkfmmpmgjhimhadgbldbhjpjfpigjkhh";
+const EXTENSION_ID = "menmcfeoaehnhnmklhgnbhglkokknnfh";
 const POLAR_ORG_ID = "0e4771fb-1ab4-41d6-a759-4362e4643bc7";
 
 const CORS_HEADERS = {
