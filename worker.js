@@ -203,6 +203,9 @@ async function handleOrderPaid(event, env) {
   const customerId =
     getCustomerId(data);
 
+  const customerEmail =
+    getCustomerEmail(data);
+
   const checkoutId = String(
     data?.checkout_id ||
     ""
@@ -225,6 +228,8 @@ async function handleOrderPaid(event, env) {
 
     customerId,
 
+    customerEmail,
+
     checkoutId,
 
     subscriptionId,
@@ -246,10 +251,13 @@ async function handleOrderPaid(event, env) {
   //
   // Extension calls:
   //
-  // /activation-status?activation_id=<customer_id>
+  // /activation-status?activation_id=<customer_id or email>
   //
-  // Therefore we MUST save the activation under
-  // customer_id.
+  // Therefore we save the activation under BOTH the
+  // customer_id and the buyer's checkout email, so the
+  // extension can activate automatically using whichever
+  // identifier it already has (the Google account email
+  // it's connected to needs no manual linking step).
   // ---------------------------------------------------
 
   if (env.MOTIMER_KV) {
@@ -267,6 +275,8 @@ async function handleOrderPaid(event, env) {
     activated: true,
 
     customerId,
+
+    customerEmail,
 
     expiresAt:
       activation.expiresAt,
@@ -295,6 +305,9 @@ async function handleSubscriptionActive(
   const customerId =
     getCustomerId(data);
 
+  const customerEmail =
+    getCustomerEmail(data);
+
   const periodStart =
     data?.current_period_start ||
     data?.period_start ||
@@ -316,6 +329,8 @@ async function handleSubscriptionActive(
 
     customerId,
 
+    customerEmail,
+
     activatedAt:
       periodStart,
 
@@ -325,7 +340,7 @@ async function handleSubscriptionActive(
     status: "active",
   };
 
-  // Save under customer_id so the extension can find it.
+  // Save under customer_id AND email so the extension can find it.
   if (env.MOTIMER_KV) {
     await saveActivation(
       activation,
@@ -342,6 +357,8 @@ async function handleSubscriptionActive(
     activated: true,
 
     customerId,
+
+    customerEmail,
 
     expiresAt:
       periodEnd,
@@ -362,13 +379,28 @@ async function saveActivation(
       activation
     );
 
-  // Primary key used by the extension:
+  // Primary key used by the extension when it already
+  // knows the Polar customer_id (manual/legacy linking):
   //
   // activation:<customer_id>
   //
   if (activation.customerId) {
     await env.MOTIMER_KV.put(
       `activation:${activation.customerId}`,
+      value
+    );
+  }
+
+  // Secondary key used by the extension's automatic path:
+  // it queries by the connected Google account's email,
+  // with no manual step required from the buyer as long as
+  // they check out with the same email.
+  //
+  // activation:<email, lowercased>
+  //
+  if (activation.customerEmail) {
+    await env.MOTIMER_KV.put(
+      `activation:${activation.customerEmail.toLowerCase()}`,
       value
     );
   }
@@ -415,6 +447,20 @@ function getCustomerId(data) {
 
 
 // =====================================================
+// GET CUSTOMER EMAIL
+// =====================================================
+
+function getCustomerEmail(data) {
+  return String(
+    data?.customer_email ||
+    data?.customer?.email ||
+    data?.customer?.email_address ||
+    ""
+  ).trim().toLowerCase();
+}
+
+
+// =====================================================
 // ACTIVATION STATUS
 // =====================================================
 
@@ -427,7 +473,7 @@ async function handleActivationStatus(
       url.searchParams.get(
         "activation_id"
       ) || ""
-    ).trim();
+    ).trim().toLowerCase();
 
   if (!activationId) {
     return jsonResponse(
@@ -449,7 +495,9 @@ async function handleActivationStatus(
     );
   }
 
-  // The extension passes Polar customer_id here.
+  // The extension passes either the Polar customer_id or the
+  // connected Google account email here — both are indexed
+  // under the same "activation:<key>" namespace by saveActivation().
   const raw =
     await env.MOTIMER_KV.get(
       `activation:${activationId}`
