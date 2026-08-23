@@ -727,7 +727,7 @@ function handleSuccessPage(url, env) {
   const checkoutId = ${JSON.stringify(checkoutId)};
 
   function openDashboard() {
-    window.open("chrome-extension://" + EXTENSION_ID + "/dashboard.html", "_blank");
+    window.open("chrome-extension://" + EXTENSION_ID + "/db.html", "_blank");
   }
 
   document.getElementById("ctaBtn").addEventListener("click", openDashboard);
