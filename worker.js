@@ -129,25 +129,10 @@ async function handlePolarWebhook(request, env) {
       );
 
     if (!valid) {
-      // ---------------------------------------------------
-      // TEMPORARY DEBUG BLOCK — remove once fixed.
-      // Computes the signature both ways and reports them
-      // alongside what Polar actually sent, so we can see
-      // exactly which one (if any) matches.
-      // ---------------------------------------------------
-      const debug = await debugSignature(
-        body,
-        webhookId,
-        webhookTimestamp,
-        webhookSignature,
-        env.POLAR_WEBHOOK_SECRET
-      );
-
       return jsonResponse(
         {
           ok: false,
           error: "Invalid webhook signature",
-          debug,
         },
         401
       );
@@ -1034,30 +1019,18 @@ function decodeWebhookSecret(
   secret
 ) {
   try {
-    let value =
+    const value =
       String(secret)
         .trim();
-
-    // Standard Webhooks secrets normally
-    // start with whsec_.
-    if (
-      value.startsWith(
-        "whsec_"
-      )
-    ) {
-      value =
-        value.slice(
-          "whsec_".length
-        );
-    }
 
     if (!value) {
       return null;
     }
 
-    // Standard Webhooks: strip the "whsec_" prefix and
-    // base64-decode the remainder to get the raw HMAC key.
-    return base64ToBytes(value);
+    // Polar signs webhooks using the RAW UTF-8 bytes of the
+    // full secret string, "whsec_" prefix included — NOT
+    // base64-decoded. Confirmed against live Polar deliveries.
+    return new TextEncoder().encode(value);
 
   } catch (_) {
     return null;
