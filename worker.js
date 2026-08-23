@@ -619,27 +619,143 @@ function handleSuccessPage(url, env) {
   ).trim();
 
   const html = `<!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Motimer — تم الدفع</title>
+<title>Motimer — Payment confirmed</title>
 <style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#0b0f14;color:#e6edf3;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}
-  .card{max-width:420px;text-align:center}
-  h1{font-size:20px;margin-bottom:12px}
-  p{color:#9aa7b2;line-height:1.6}
-  .spinner{width:36px;height:36px;border:3px solid #263140;border-top-color:#4f9dff;border-radius:50%;margin:0 auto 20px;animation:spin 0.8s linear infinite}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .ok{color:#3fd07a}
-  .err{color:#ff6b6b}
+  :root{
+    --ink:#0f1a13;
+    --muted:#5b6b60;
+    --paper:#fafaf7;
+    --card:#ffffff;
+    --line:#e7ede8;
+    --green:#178a4c;
+    --green-deep:#0f6b3a;
+    --green-soft:#e6f6ec;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:24px;
+    background:var(--paper);
+    background-image:radial-gradient(circle at 15% 10%, #eef7f0 0%, transparent 45%),
+                      radial-gradient(circle at 85% 90%, #eef7f0 0%, transparent 45%);
+    color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Arial,sans-serif;
+  }
+  .card{
+    width:100%;
+    max-width:400px;
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:20px;
+    padding:40px 32px 32px;
+    text-align:center;
+    box-shadow:0 1px 2px rgba(15,26,19,0.04), 0 20px 40px -20px rgba(15,26,19,0.12);
+  }
+  .ring-wrap{
+    width:76px;
+    height:76px;
+    margin:0 auto 24px;
+    position:relative;
+  }
+  .ring-wrap svg{ transform:rotate(-90deg); }
+  .ring-track{ fill:none; stroke:var(--green-soft); stroke-width:5; }
+  .ring-progress{
+    fill:none;
+    stroke:var(--green);
+    stroke-width:5;
+    stroke-linecap:round;
+    stroke-dasharray:207;
+    stroke-dashoffset:207;
+    animation:fill-ring 1.1s cubic-bezier(.4,0,.2,1) forwards;
+  }
+  @keyframes fill-ring{ to{ stroke-dashoffset:0; } }
+  .ring-check{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    opacity:0;
+    transform:scale(0.5);
+    transition:opacity .3s ease, transform .3s cubic-bezier(.34,1.56,.64,1);
+  }
+  .ring-check.show{ opacity:1; transform:scale(1); }
+  .ring-check svg{ width:28px; height:28px; }
+  .ring-wrap.spin .ring-progress{
+    animation:spin-ring 0.9s linear infinite;
+    stroke-dasharray:140 67;
+  }
+  @keyframes spin-ring{ to{ transform:rotate(270deg); } }
+  h1{
+    font-size:19px;
+    font-weight:650;
+    letter-spacing:-0.01em;
+    margin:0 0 8px;
+    color:var(--ink);
+  }
+  h1.err{ color:#a3341c; }
+  p{
+    margin:0;
+    color:var(--muted);
+    font-size:14.5px;
+    line-height:1.55;
+  }
+  .cta{
+    display:none;
+    margin-top:24px;
+    width:100%;
+    padding:12px 20px;
+    background:var(--green);
+    color:#fff;
+    border:none;
+    border-radius:12px;
+    font-size:14.5px;
+    font-weight:600;
+    cursor:pointer;
+    transition:background .15s ease, transform .1s ease;
+  }
+  .cta:hover{ background:var(--green-deep); }
+  .cta:active{ transform:scale(0.98); }
+  .cta.show{ display:inline-flex; align-items:center; justify-content:center; gap:6px; }
+  .brand{
+    margin-top:28px;
+    padding-top:20px;
+    border-top:1px solid var(--line);
+    font-size:12px;
+    color:#9aa79f;
+    letter-spacing:.02em;
+  }
+  .brand b{ color:var(--muted); font-weight:600; }
+  @media (prefers-reduced-motion: reduce){
+    .ring-progress, .ring-wrap.spin .ring-progress, .ring-check{ animation:none !important; transition:none !important; }
+  }
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="spinner" id="spinner"></div>
-  <h1 id="title">جاري تفعيل اشتراكك…</h1>
-  <p id="msg">من فضلك متقفلش الصفحة دي.</p>
+  <div class="ring-wrap" id="ringWrap">
+    <svg viewBox="0 0 76 76" width="76" height="76">
+      <circle class="ring-track" cx="38" cy="38" r="33"></circle>
+      <circle class="ring-progress" id="ringProgress" cx="38" cy="38" r="33"></circle>
+    </svg>
+    <div class="ring-check" id="ringCheck">
+      <svg viewBox="0 0 24 24" fill="none">
+        <path d="M4 12.5L9.5 18L20 6" stroke="#178a4c" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+  </div>
+  <h1 id="title">Confirming your payment…</h1>
+  <p id="msg">Please keep this tab open — it only takes a moment.</p>
+  <button class="cta" id="ctaBtn" type="button">Open dashboard →</button>
+  <div class="brand"><b>Motimer</b> · secure checkout via Polar</div>
 </div>
 <script>
 (function(){
@@ -647,18 +763,33 @@ function handleSuccessPage(url, env) {
   const checkoutId = ${JSON.stringify(checkoutId)};
   const titleEl = document.getElementById("title");
   const msgEl = document.getElementById("msg");
-  const spinnerEl = document.getElementById("spinner");
+  const ringWrap = document.getElementById("ringWrap");
+  const ringCheck = document.getElementById("ringCheck");
+  const ctaBtn = document.getElementById("ctaBtn");
 
-  function done(ok, title, msg) {
-    spinnerEl.style.display = "none";
+  ringWrap.classList.add("spin");
+
+  ctaBtn.addEventListener("click", function () {
+    window.open("chrome-extension://" + EXTENSION_ID + "/dashboard.html", "_blank");
+  });
+
+  function done(ok, title, msg, opts) {
+    opts = opts || {};
+    ringWrap.classList.remove("spin");
+    if (ok) {
+      ringCheck.classList.add("show");
+    }
     titleEl.textContent = title;
-    titleEl.className = ok ? "ok" : "err";
+    titleEl.className = ok ? "" : "err";
     msgEl.textContent = msg;
+    if (opts.showCta) {
+      ctaBtn.classList.add("show");
+    }
   }
 
   function sendToExtension(customerId) {
     if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
-      done(false, "افتح الصفحة دي من نفس المتصفح اللي فيه Motimer", "الإكستنشن مش متاح من المتصفح ده.");
+      done(false, "Open this page in your Motimer browser", "The extension isn't available from this browser.");
       return;
     }
     chrome.runtime.sendMessage(
@@ -666,10 +797,10 @@ function handleSuccessPage(url, env) {
       { type: "MOTIMER_ACTIVATE_LICENSE", customerId: customerId },
       function (response) {
         if (chrome.runtime.lastError || !response || !response.ok) {
-          done(false, "الدفع نجح، بس التفعيل التلقائي مايتحصلش", "افتح إعدادات Motimer ودوس Activate يدويًا.");
+          done(false, "Payment succeeded — one manual step left", "Open Motimer settings and click Activate.");
           return;
         }
-        done(true, "تم تفعيل اشتراكك بنجاح", "تقدر تقفل الصفحة دي دلوقتي وترجع لـ Motimer.");
+        done(true, "You're all set", "Your Motimer subscription is active.", { showCta: true });
       }
     );
   }
@@ -677,7 +808,7 @@ function handleSuccessPage(url, env) {
   async function pollForCustomerId(attempt) {
     attempt = attempt || 0;
     if (!checkoutId) {
-      done(false, "لينك مش صحيح", "الصفحة دي محتاجة تتفتح من رابط الدفع بتاع Polar.");
+      done(false, "This link isn't valid", "Open this page from your Polar checkout link.");
       return;
     }
     try {
@@ -691,7 +822,7 @@ function handleSuccessPage(url, env) {
     if (attempt < 8) {
       setTimeout(function () { pollForCustomerId(attempt + 1); }, 2000);
     } else {
-      done(false, "لسه الدفع بيتأكد", "استنى شوية وافتح إعدادات Motimer، أو افتح الصفحة دي تاني.");
+      done(false, "Still confirming your payment", "Give it a moment, then reopen Motimer settings or refresh this page.");
     }
   }
 
@@ -859,94 +990,6 @@ async function verifyWebhookSignature(
   } catch (_) {
     return false;
   }
-}
-
-
-// =====================================================
-// DEBUG SIGNATURE (temporary — remove once fixed)
-// =====================================================
-
-async function computeSignatureVariant(signedPayload, keyBytes) {
-  try {
-    const key = await crypto.subtle.importKey(
-      "raw",
-      keyBytes,
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-    const sigBuf = await crypto.subtle.sign(
-      "HMAC",
-      key,
-      new TextEncoder().encode(signedPayload)
-    );
-    return bytesToBase64(new Uint8Array(sigBuf));
-  } catch (e) {
-    return "error: " + String(e?.message || e);
-  }
-}
-
-function bytesToBase64(bytes) {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-async function debugSignature(
-  body,
-  webhookId,
-  timestamp,
-  signatureHeader,
-  secret
-) {
-  const signedPayload = `${webhookId}.${timestamp}.${body}`;
-  const raw = String(secret).trim();
-  const stripped = raw.startsWith("whsec_")
-    ? raw.slice("whsec_".length)
-    : raw;
-
-  const variants = {};
-
-  // Variant A: strip prefix, base64-decode (original spec-style)
-  const bytesA = base64ToBytes(stripped);
-  variants.a_stripped_base64decoded = bytesA
-    ? await computeSignatureVariant(signedPayload, bytesA)
-    : "invalid base64";
-
-  // Variant B: strip prefix, raw UTF-8 bytes
-  const bytesB = new TextEncoder().encode(stripped);
-  variants.b_stripped_rawbytes = await computeSignatureVariant(
-    signedPayload,
-    bytesB
-  );
-
-  // Variant C: full secret incl. whsec_, raw UTF-8 bytes
-  const bytesC = new TextEncoder().encode(raw);
-  variants.c_full_rawbytes = await computeSignatureVariant(
-    signedPayload,
-    bytesC
-  );
-
-  // Variant D: full secret incl. whsec_, base64-decoded
-  const bytesD = base64ToBytes(raw);
-  variants.d_full_base64decoded = bytesD
-    ? await computeSignatureVariant(signedPayload, bytesD)
-    : "invalid base64";
-
-  return {
-    receivedSignatureHeader: signatureHeader,
-    parsedReceivedSignatures: parseSignatures(signatureHeader),
-    secretLength: raw.length,
-    strippedSecretLength: stripped.length,
-    bodyLength: body.length,
-    signedPayloadPreview:
-      signedPayload.length > 120
-        ? signedPayload.slice(0, 120) + "…"
-        : signedPayload,
-    computed: variants,
-  };
 }
 
 
