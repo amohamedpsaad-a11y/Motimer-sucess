@@ -644,64 +644,36 @@ function handleSuccessPage(url, env) {
     justify-content:center;
     padding:24px;
     background:var(--paper);
-    background-image:radial-gradient(circle at 15% 10%, #eef7f0 0%, transparent 45%),
-                      radial-gradient(circle at 85% 90%, #eef7f0 0%, transparent 45%);
     color:var(--ink);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Arial,sans-serif;
   }
   .card{
     width:100%;
-    max-width:400px;
+    max-width:380px;
     background:var(--card);
     border:1px solid var(--line);
-    border-radius:20px;
-    padding:40px 32px 32px;
+    border-radius:16px;
+    padding:36px 32px 28px;
     text-align:center;
-    box-shadow:0 1px 2px rgba(15,26,19,0.04), 0 20px 40px -20px rgba(15,26,19,0.12);
+    box-shadow:0 1px 2px rgba(15,26,19,0.04), 0 12px 28px -16px rgba(15,26,19,0.12);
   }
-  .ring-wrap{
-    width:76px;
-    height:76px;
-    margin:0 auto 24px;
-    position:relative;
-  }
-  .ring-wrap svg{ transform:rotate(-90deg); }
-  .ring-track{ fill:none; stroke:var(--green-soft); stroke-width:5; }
-  .ring-progress{
-    fill:none;
-    stroke:var(--green);
-    stroke-width:5;
-    stroke-linecap:round;
-    stroke-dasharray:207;
-    stroke-dashoffset:207;
-    animation:fill-ring 1.1s cubic-bezier(.4,0,.2,1) forwards;
-  }
-  @keyframes fill-ring{ to{ stroke-dashoffset:0; } }
-  .ring-check{
-    position:absolute;
-    inset:0;
+  .check{
+    width:52px;
+    height:52px;
+    margin:0 auto 20px;
+    border-radius:50%;
+    background:var(--green-soft);
     display:flex;
     align-items:center;
     justify-content:center;
-    opacity:0;
-    transform:scale(0.5);
-    transition:opacity .3s ease, transform .3s cubic-bezier(.34,1.56,.64,1);
   }
-  .ring-check.show{ opacity:1; transform:scale(1); }
-  .ring-check svg{ width:28px; height:28px; }
-  .ring-wrap.spin .ring-progress{
-    animation:spin-ring 0.9s linear infinite;
-    stroke-dasharray:140 67;
-  }
-  @keyframes spin-ring{ to{ transform:rotate(270deg); } }
+  .check svg{ width:24px; height:24px; }
   h1{
     font-size:19px;
     font-weight:650;
     letter-spacing:-0.01em;
     margin:0 0 8px;
-    color:var(--ink);
   }
-  h1.err{ color:#a3341c; }
   p{
     margin:0;
     color:var(--muted);
@@ -709,108 +681,66 @@ function handleSuccessPage(url, env) {
     line-height:1.55;
   }
   .cta{
-    display:none;
     margin-top:24px;
     width:100%;
     padding:12px 20px;
     background:var(--green);
     color:#fff;
     border:none;
-    border-radius:12px;
+    border-radius:10px;
     font-size:14.5px;
     font-weight:600;
     cursor:pointer;
-    transition:background .15s ease, transform .1s ease;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap:6px;
+    transition:background .15s ease;
+    text-decoration:none;
   }
   .cta:hover{ background:var(--green-deep); }
-  .cta:active{ transform:scale(0.98); }
-  .cta.show{ display:inline-flex; align-items:center; justify-content:center; gap:6px; }
   .brand{
-    margin-top:28px;
-    padding-top:20px;
+    margin-top:24px;
+    padding-top:18px;
     border-top:1px solid var(--line);
     font-size:12px;
     color:#9aa79f;
-    letter-spacing:.02em;
   }
   .brand b{ color:var(--muted); font-weight:600; }
-  @media (prefers-reduced-motion: reduce){
-    .ring-progress, .ring-wrap.spin .ring-progress, .ring-check{ animation:none !important; transition:none !important; }
-  }
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="ring-wrap" id="ringWrap">
-    <svg viewBox="0 0 76 76" width="76" height="76">
-      <circle class="ring-track" cx="38" cy="38" r="33"></circle>
-      <circle class="ring-progress" id="ringProgress" cx="38" cy="38" r="33"></circle>
+  <div class="check">
+    <svg viewBox="0 0 24 24" fill="none">
+      <path d="M4 12.5L9.5 18L20 6" stroke="#178a4c" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
-    <div class="ring-check" id="ringCheck">
-      <svg viewBox="0 0 24 24" fill="none">
-        <path d="M4 12.5L9.5 18L20 6" stroke="#178a4c" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-    </div>
   </div>
-  <h1 id="title">Confirming your payment…</h1>
-  <p id="msg">Please keep this tab open — it only takes a moment.</p>
-  <button class="cta" id="ctaBtn" type="button">Open dashboard →</button>
+  <h1>Payment confirmed</h1>
+  <p>Your Motimer subscription is active.</p>
+  <button class="cta" id="ctaBtn" type="button">Go to dashboard →</button>
   <div class="brand"><b>Motimer</b> · secure checkout via Polar</div>
 </div>
 <script>
 (function(){
-  const EXTENSION_ID = "naneplpkjaopmhgfnlilahhinigppnna";
+  const EXTENSION_ID = "hkogoheijgpicaokfbdpehgppdgppijl";
   const checkoutId = ${JSON.stringify(checkoutId)};
-  const titleEl = document.getElementById("title");
-  const msgEl = document.getElementById("msg");
-  const ringWrap = document.getElementById("ringWrap");
-  const ringCheck = document.getElementById("ringCheck");
-  const ctaBtn = document.getElementById("ctaBtn");
 
-  ringWrap.classList.add("spin");
-
-  ctaBtn.addEventListener("click", function () {
+  function openDashboard() {
     window.open("chrome-extension://" + EXTENSION_ID + "/dashboard.html", "_blank");
-  });
-
-  function done(ok, title, msg, opts) {
-    opts = opts || {};
-    ringWrap.classList.remove("spin");
-    if (ok) {
-      ringCheck.classList.add("show");
-    }
-    titleEl.textContent = title;
-    titleEl.className = ok ? "" : "err";
-    msgEl.textContent = msg;
-    if (opts.showCta) {
-      ctaBtn.classList.add("show");
-    }
   }
 
+  document.getElementById("ctaBtn").addEventListener("click", openDashboard);
+
+  // Quietly try to hand the customer ID to the extension in the
+  // background — no loading state, doesn't block the page.
   function sendToExtension(customerId) {
-    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
-      done(false, "Open this page in your Motimer browser", "The extension isn't available from this browser.");
-      return;
-    }
-    chrome.runtime.sendMessage(
-      EXTENSION_ID,
-      { type: "MOTIMER_ACTIVATE_LICENSE", customerId: customerId },
-      function (response) {
-        if (chrome.runtime.lastError || !response || !response.ok) {
-          done(false, "Payment succeeded — one manual step left", "Open Motimer settings and click Activate.");
-          return;
-        }
-        done(true, "You're all set", "Your Motimer subscription is active.", { showCta: true });
-      }
-    );
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) return;
+    chrome.runtime.sendMessage(EXTENSION_ID, { type: "MOTIMER_ACTIVATE_LICENSE", customerId: customerId });
   }
 
-  async function pollForCustomerId(attempt) {
-    attempt = attempt || 0;
-    if (!checkoutId) {
-      done(false, "This link isn't valid", "Open this page from your Polar checkout link.");
-      return;
-    }
+  async function tryActivate(attempt) {
+    if (!checkoutId || attempt >= 3) return;
     try {
       const res = await fetch("/activation-status?activation_id=" + encodeURIComponent("checkout:" + checkoutId), { cache: "no-store" });
       const json = await res.json().catch(function(){ return {}; });
@@ -819,14 +749,10 @@ function handleSuccessPage(url, env) {
         return;
       }
     } catch (e) {}
-    if (attempt < 8) {
-      setTimeout(function () { pollForCustomerId(attempt + 1); }, 2000);
-    } else {
-      done(false, "Still confirming your payment", "Give it a moment, then reopen Motimer settings or refresh this page.");
-    }
+    setTimeout(function () { tryActivate(attempt + 1); }, 900);
   }
 
-  pollForCustomerId(0);
+  tryActivate(0);
 })();
 </script>
 </body>
