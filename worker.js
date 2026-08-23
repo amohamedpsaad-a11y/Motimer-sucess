@@ -1055,20 +1055,9 @@ function decodeWebhookSecret(
       return null;
     }
 
-    // Use the raw UTF-8 bytes directly as the HMAC key
-    // (Polar-specific — do NOT base64-decode).
-    return new TextEncoder().encode(value);
-
-    // --- Alternate variant to try if the above still 401s ---
-    // Some Polar integrations report needing the FULL secret,
-    // whsec_ prefix included, as the raw key bytes:
-    //
-    //   return new TextEncoder().encode(String(secret).trim());
-    //
-    // --- Original Standard Webhooks spec behavior (kept for
-    // reference / other providers like Svix, Clerk) ---
-    //
-    //   return base64ToBytes(value);
+    // Standard Webhooks: strip the "whsec_" prefix and
+    // base64-decode the remainder to get the raw HMAC key.
+    return base64ToBytes(value);
 
   } catch (_) {
     return null;
