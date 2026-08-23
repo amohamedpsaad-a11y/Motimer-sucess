@@ -643,7 +643,7 @@ function handleSuccessPage(url, env) {
 </div>
 <script>
 (function(){
-  const EXTENSION_ID = "menmcfeoaehnhnmklhgnbhglkokknnfh";
+  const EXTENSION_ID = "hkogoheijgpicaokfbdpehgppdgppijl";
   const checkoutId = ${JSON.stringify(checkoutId)};
   const titleEl = document.getElementById("title");
   const msgEl = document.getElementById("msg");
