@@ -734,6 +734,16 @@ function handleSuccessPage(url, env) {
 // Signature normally looks like:
 //
 //   v1,xxxxxxxx
+//
+// NOTE (Polar-specific quirk):
+// Polar's own docs warn that rolling your own verification
+// needs the secret "base64 encoded" before generating the
+// signature — unlike the generic Standard Webhooks spec,
+// where the whsec_-prefixed secret is ALREADY base64 and
+// gets base64-DECODED to obtain the raw HMAC key bytes.
+// For Polar, the safe approach is to use the secret's raw
+// UTF-8 bytes directly as the HMAC key (see
+// decodeWebhookSecret below) instead of base64-decoding it.
 // =====================================================
 
 const WEBHOOK_TIMESTAMP_TOLERANCE =
@@ -904,6 +914,18 @@ function parseSignatures(
 // =====================================================
 // DECODE WEBHOOK SECRET
 // =====================================================
+//
+// FIXED: Polar's docs explicitly warn that custom signature
+// verification needs the secret "base64 encoded" before
+// generating the signature — the opposite of the generic
+// Standard Webhooks spec (which base64-DECODES the secret to
+// get the raw HMAC key). In practice this means Polar expects
+// the raw UTF-8 bytes of the secret string as the HMAC key,
+// NOT a base64-decoded version of it.
+//
+// If this still fails, try the alternate variant below that
+// keeps the "whsec_" prefix as part of the key bytes.
+// =====================================================
 
 function decodeWebhookSecret(
   secret
@@ -930,9 +952,20 @@ function decodeWebhookSecret(
       return null;
     }
 
-    return base64ToBytes(
-      value
-    );
+    // Use the raw UTF-8 bytes directly as the HMAC key
+    // (Polar-specific — do NOT base64-decode).
+    return new TextEncoder().encode(value);
+
+    // --- Alternate variant to try if the above still 401s ---
+    // Some Polar integrations report needing the FULL secret,
+    // whsec_ prefix included, as the raw key bytes:
+    //
+    //   return new TextEncoder().encode(String(secret).trim());
+    //
+    // --- Original Standard Webhooks spec behavior (kept for
+    // reference / other providers like Svix, Clerk) ---
+    //
+    //   return base64ToBytes(value);
 
   } catch (_) {
     return null;
