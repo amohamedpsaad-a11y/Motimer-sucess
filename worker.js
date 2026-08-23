@@ -6,6 +6,7 @@
 //
 // Required Cloudflare secret:
 //   POLAR_WEBHOOK_SECRET
+//   POLAR_ACCESS_TOKEN
 //
 // Required KV binding:
 //   MOTIMER_KV
@@ -62,6 +63,17 @@ export default {
       request.method === "GET"
     ) {
       return handleSuccessPage(url, env);
+    }
+
+    // =================================================
+    // CUSTOMER PORTAL
+    // =================================================
+
+    if (
+      url.pathname === "/customer-portal" &&
+      request.method === "GET"
+    ) {
+      return handleCustomerPortal(url, env);
     }
 
     return jsonResponse(
@@ -592,6 +604,79 @@ async function handleActivationStatus(
     expiresAt:
       activation.expiresAt,
   });
+}
+
+
+// =====================================================
+// CUSTOMER PORTAL
+// =====================================================
+//
+// Extension calls:
+//
+//   /customer-portal?customer_id=<Polar customer_id>
+//
+// This creates a short-lived Polar customer session
+// server-side (using our secret Organization Access Token)
+// and returns the resulting customer_portal_url, which
+// already embeds a customer_session_token scoped to that
+// one customer. The extension just opens that URL in a
+// new tab — see db.js openManageSubscription().
+// =====================================================
+
+async function handleCustomerPortal(url, env) {
+  const customerId = String(
+    url.searchParams.get("customer_id") || ""
+  ).trim();
+
+  if (!customerId) {
+    return jsonResponse(
+      { ok: false, error: "Missing customer_id" },
+      400
+    );
+  }
+
+  if (!env.POLAR_ACCESS_TOKEN) {
+    return jsonResponse(
+      { ok: false, error: "POLAR_ACCESS_TOKEN is not configured" },
+      500
+    );
+  }
+
+  try {
+    const res = await fetch(
+      "https://api.polar.sh/v1/customer-sessions/",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ customer_id: customerId }),
+      }
+    );
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || !data?.customer_portal_url) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: data?.detail || "Polar API error",
+        },
+        res.status || 502
+      );
+    }
+
+    return jsonResponse({
+      ok: true,
+      url: data.customer_portal_url,
+    });
+  } catch (err) {
+    return jsonResponse(
+      { ok: false, error: String(err?.message || err) },
+      500
+    );
+  }
 }
 
 
