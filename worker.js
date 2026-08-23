@@ -723,7 +723,7 @@ function handleSuccessPage(url, env) {
 </div>
 <script>
 (function(){
-  const EXTENSION_ID = "naneplpkjaopmhgfnlilahhinigppnna";
+  const EXTENSION_ID = "dfbbngpobeclbnlgmomccloajmmpdldg";
   const checkoutId = ${JSON.stringify(checkoutId)};
 
   function openDashboard() {
