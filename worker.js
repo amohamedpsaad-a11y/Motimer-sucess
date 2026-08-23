@@ -7,28 +7,22 @@
 // Subscription duration:
 //   30 days
 //
-// This Worker:
-// - Receives Polar webhooks
-// - Verifies the webhook signature
-// - Records successful payments
-// - Creates a 30-day activation
-// - Lets the extension check activation status
-//
 // IMPORTANT:
-// Add these Cloudflare Worker secrets:
+// Add this Cloudflare Worker secret:
+//
 //   POLAR_WEBHOOK_SECRET
 //
-// Optional:
-//   MOTIMER_EXTENSION_ID
+// KV binding:
 //
-// Do NOT put your Polar API token in the extension.
+//   MOTIMER_KV
 
 const SUBSCRIPTION_DAYS = 30;
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Polar-Webhook-Signature",
+  "Access-Control-Allow-Headers":
+    "Content-Type, webhook-id, webhook-timestamp, webhook-signature, Polar-Webhook-Signature, X-Polar-Signature",
 };
 
 export default {
@@ -42,10 +36,7 @@ export default {
       });
     }
 
-    // -------------------------------------------------
     // Polar webhook
-    // -------------------------------------------------
-
     if (
       url.pathname === "/polar-webhook" &&
       request.method === "POST"
@@ -53,10 +44,7 @@ export default {
       return handlePolarWebhook(request, env);
     }
 
-    // -------------------------------------------------
     // Extension activation check
-    // -------------------------------------------------
-
     if (
       url.pathname === "/activation-status" &&
       request.method === "GET"
@@ -79,36 +67,37 @@ export default {
 // POLAR WEBHOOK
 // =====================================================
 
-async function handlePolarWebhook(
-  request,
-  env
-) {
+async function handlePolarWebhook(request, env) {
   try {
-    const body =
-      await request.text();
+    // IMPORTANT:
+    // Read the raw body before doing JSON.parse().
+    const body = await request.text();
 
-    const signature =
-      request.headers.get(
-        "Polar-Webhook-Signature"
-      ) ||
-      request.headers.get(
-        "X-Polar-Signature"
-      );
+    const webhookId =
+      request.headers.get("webhook-id");
 
-    if (!signature) {
+    const webhookTimestamp =
+      request.headers.get("webhook-timestamp");
+
+    const webhookSignature =
+      request.headers.get("webhook-signature");
+
+    if (
+      !webhookId ||
+      !webhookTimestamp ||
+      !webhookSignature
+    ) {
       return jsonResponse(
         {
           ok: false,
           error:
-            "Missing webhook signature",
+            "Missing Polar webhook signature headers",
         },
         401
       );
     }
 
-    if (
-      !env.POLAR_WEBHOOK_SECRET
-    ) {
+    if (!env.POLAR_WEBHOOK_SECRET) {
       return jsonResponse(
         {
           ok: false,
@@ -122,7 +111,7 @@ async function handlePolarWebhook(
     const valid =
       await verifyWebhookSignature(
         body,
-        signature,
+        request.headers,
         env.POLAR_WEBHOOK_SECRET
       );
 
@@ -130,8 +119,7 @@ async function handlePolarWebhook(
       return jsonResponse(
         {
           ok: false,
-          error:
-            "Invalid webhook signature",
+          error: "Invalid webhook signature",
         },
         401
       );
@@ -140,43 +128,29 @@ async function handlePolarWebhook(
     let event;
 
     try {
-      event =
-        JSON.parse(body);
+      event = JSON.parse(body);
     } catch (_) {
       return jsonResponse(
         {
           ok: false,
-          error:
-            "Invalid JSON",
+          error: "Invalid JSON",
         },
         400
       );
     }
 
     const eventType =
-      getEventType(
-        request,
-        event
-      );
+      getEventType(request, event);
 
-    // -------------------------------------------------
-    // Successful order
-    // -------------------------------------------------
-
-    if (
-      eventType ===
-      "order.paid"
-    ) {
+    // order.paid
+    if (eventType === "order.paid") {
       return await handleOrderPaid(
         event,
         env
       );
     }
 
-    // -------------------------------------------------
-    // Active subscription
-    // -------------------------------------------------
-
+    // subscription.active
     if (
       eventType ===
       "subscription.active"
@@ -193,13 +167,13 @@ async function handlePolarWebhook(
       ignored: true,
       event: eventType,
     });
+
   } catch (err) {
     return jsonResponse(
       {
         ok: false,
         error: String(
-          err?.message ||
-          err
+          err?.message || err
         ),
       },
       500
@@ -217,43 +191,33 @@ async function handleOrderPaid(
   env
 ) {
   const data =
-    event?.data ||
-    event;
+    event?.data || event;
 
-  const orderId =
-    String(
-      data?.id ||
-      data?.order_id ||
-      ""
-    );
+  const orderId = String(
+    data?.id ||
+    data?.order_id ||
+    ""
+  );
 
-  const customerId =
-    String(
-      data?.customer_id ||
-      ""
-    );
+  const customerId = String(
+    data?.customer_id ||
+    ""
+  );
 
-  const checkoutId =
-    String(
-      data?.checkout_id ||
-      ""
-    );
+  const checkoutId = String(
+    data?.checkout_id ||
+    ""
+  );
 
-  const subscriptionId =
-    String(
-      data?.subscription_id ||
-      ""
-    );
+  const subscriptionId = String(
+    data?.subscription_id ||
+    ""
+  );
 
   const paidAt =
     data?.paid_at ||
     data?.created_at ||
     new Date().toISOString();
-
-  // We deliberately do NOT use customer_id
-  // as the extension identity.
-  //
-  // It is only stored as payment information.
 
   const activation = {
     ok: true,
@@ -266,32 +230,19 @@ async function handleOrderPaid(
 
     subscriptionId,
 
-    activatedAt:
+    activatedAt: paidAt,
+
+    expiresAt: addDays(
       paidAt,
+      SUBSCRIPTION_DAYS
+    ),
 
-    expiresAt:
-      addDays(
-        paidAt,
-        SUBSCRIPTION_DAYS
-      ),
+    days: SUBSCRIPTION_DAYS,
 
-    days:
-      SUBSCRIPTION_DAYS,
-
-    status:
-      "active",
+    status: "active",
   };
 
-  /*
-   * If KV is configured, save the activation.
-   *
-   * Create a KV binding named:
-   *
-   * MOTIMER_KV
-   */
-
   if (env.MOTIMER_KV) {
-
     const key =
       makeActivationKey(
         activation
@@ -308,11 +259,9 @@ async function handleOrderPaid(
   return jsonResponse({
     ok: true,
 
-    event:
-      "order.paid",
+    event: "order.paid",
 
-    activated:
-      true,
+    activated: true,
 
     expiresAt:
       activation.expiresAt,
@@ -329,8 +278,7 @@ async function handleSubscriptionActive(
   env
 ) {
   const data =
-    event?.data ||
-    event;
+    event?.data || event;
 
   const subscriptionId =
     String(
@@ -371,12 +319,10 @@ async function handleSubscriptionActive(
     expiresAt:
       periodEnd,
 
-    status:
-      "active",
+    status: "active",
   };
 
   if (env.MOTIMER_KV) {
-
     const key =
       makeActivationKey(
         activation
@@ -396,8 +342,7 @@ async function handleSubscriptionActive(
     event:
       "subscription.active",
 
-    activated:
-      true,
+    activated: true,
 
     expiresAt:
       periodEnd,
@@ -417,8 +362,7 @@ async function handleActivationStatus(
     String(
       url.searchParams.get(
         "activation_id"
-      ) ||
-      ""
+      ) || ""
     ).trim();
 
   if (!activationId) {
@@ -451,18 +395,10 @@ async function handleActivationStatus(
   if (!raw) {
     return jsonResponse({
       ok: true,
-
-      active:
-        false,
-
-      status:
-        "not_activated",
-
-      daysRemaining:
-        0,
-
-      expiresAt:
-        "",
+      active: false,
+      status: "not_activated",
+      daysRemaining: 0,
+      expiresAt: "",
     });
   }
 
@@ -487,8 +423,7 @@ async function handleActivationStatus(
       activation.expiresAt
     ).getTime();
 
-  const now =
-    Date.now();
+  const now = Date.now();
 
   const remainingMs =
     expires - now;
@@ -498,7 +433,7 @@ async function handleActivationStatus(
       0,
       Math.ceil(
         remainingMs /
-        (1000 * 60 * 60 * 24)
+          (1000 * 60 * 60 * 24)
       )
     );
 
@@ -510,10 +445,9 @@ async function handleActivationStatus(
 
     active,
 
-    status:
-      active
-        ? "active"
-        : "expired",
+    status: active
+      ? "active"
+      : "expired",
 
     daysRemaining,
 
@@ -529,63 +463,141 @@ async function handleActivationStatus(
 // =====================================================
 // WEBHOOK SIGNATURE
 // =====================================================
+//
+// Polar webhook headers:
+//
+//   webhook-id
+//   webhook-timestamp
+//   webhook-signature
+//
+// Signed payload:
+//
+//   webhook-id + "." +
+//   webhook-timestamp + "." +
+//   rawBody
+//
+// This validator supports both the literal secret
+// and the Standard Webhooks derived secret format.
+//
+
+const WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS =
+  5 * 60;
+
 
 async function verifyWebhookSignature(
   payload,
-  signatureHeader,
+  headers,
   secret
 ) {
   try {
-    const signature =
-      extractSignature(
-        signatureHeader
-      );
+    const webhookId =
+      String(
+        headers.get(
+          "webhook-id"
+        ) || ""
+      ).trim();
 
-    if (!signature) {
-      return false;
-    }
+    const timestamp =
+      String(
+        headers.get(
+          "webhook-timestamp"
+        ) || ""
+      ).trim();
 
-    const key =
-      await crypto.subtle.importKey(
-        "raw",
-
-        new TextEncoder().encode(
-          secret
-        ),
-
-        {
-          name:
-            "HMAC",
-
-          hash:
-            "SHA-256",
-        },
-
-        false,
-
-        [
-          "verify",
-        ]
-      );
-
-    const signatureBytes =
-      hexToBytes(
-        signature
-      );
+    const signatureHeader =
+      String(
+        headers.get(
+          "webhook-signature"
+        ) || ""
+      ).trim();
 
     if (
-      !signatureBytes
+      !webhookId ||
+      !timestamp ||
+      !signatureHeader ||
+      !secret
     ) {
       return false;
     }
 
-    return await crypto.subtle.verify(
-      "HMAC",
-      key,
-      signatureBytes,
-      new TextEncoder().encode(
-        payload
+    // Prevent replay attacks.
+    const timestampNumber =
+      Number(timestamp);
+
+    if (
+      !Number.isFinite(
+        timestampNumber
       )
+    ) {
+      return false;
+    }
+
+    const age =
+      Math.abs(
+        Math.floor(
+          Date.now() / 1000
+        ) - timestampNumber
+      );
+
+    if (
+      age >
+      WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS
+    ) {
+      return false;
+    }
+
+    const signedPayload =
+      `${webhookId}.${timestamp}.${payload}`;
+
+    const signatures =
+      parseWebhookSignatures(
+        signatureHeader
+      );
+
+    if (
+      signatures.length === 0
+    ) {
+      return false;
+    }
+
+    // Try literal secret.
+    const literalKey =
+      await importHmacKey(
+        new TextEncoder().encode(
+          secret
+        )
+      );
+
+    const literalValid =
+      await verifyAnySignature(
+        literalKey,
+        signedPayload,
+        signatures
+      );
+
+    if (literalValid) {
+      return true;
+    }
+
+    // Try Standard Webhooks secret.
+    const standardKeyBytes =
+      decodeStandardWebhookSecret(
+        secret
+      );
+
+    if (!standardKeyBytes) {
+      return false;
+    }
+
+    const standardKey =
+      await importHmacKey(
+        standardKeyBytes
+      );
+
+    return await verifyAnySignature(
+      standardKey,
+      signedPayload,
+      signatures
     );
 
   } catch (_) {
@@ -594,75 +606,175 @@ async function verifyWebhookSignature(
 }
 
 
-function extractSignature(
-  value
+async function importHmacKey(
+  keyBytes
 ) {
-  if (!value) {
-    return "";
-  }
-
-  const text =
-    String(value).trim();
-
-  // Supports:
-  // sha256=<hex>
-  // v1=<hex>
-  // <hex>
-
-  if (
-    text.startsWith(
-      "sha256="
-    )
-  ) {
-    return text.slice(7);
-  }
-
-  if (
-    text.startsWith(
-      "v1="
-    )
-  ) {
-    return text.slice(3);
-  }
-
-  return text;
+  return crypto.subtle.importKey(
+    "raw",
+    keyBytes,
+    {
+      name: "HMAC",
+      hash: "SHA-256",
+    },
+    false,
+    ["verify"]
+  );
 }
 
 
-function hexToBytes(
-  hex
+function parseWebhookSignatures(
+  header
 ) {
-  if (
-    !hex ||
-    hex.length % 2 !== 0 ||
-    !/^[0-9a-f]+$/i.test(
-      hex
-    )
+  const result = [];
+
+  // Example:
+  //
+  // v1,xxxxx v1,yyyyy
+
+  for (
+    const item of
+    String(header)
+      .trim()
+      .split(/\s+/)
   ) {
-    return null;
+    if (!item) {
+      continue;
+    }
+
+    const comma =
+      item.indexOf(",");
+
+    if (comma === -1) {
+      continue;
+    }
+
+    const version =
+      item
+        .slice(0, comma)
+        .trim();
+
+    const value =
+      item
+        .slice(comma + 1)
+        .trim();
+
+    if (
+      version === "v1" &&
+      value
+    ) {
+      result.push(value);
+    }
   }
 
-  const bytes =
-    new Uint8Array(
-      hex.length / 2
+  return result;
+}
+
+
+async function verifyAnySignature(
+  key,
+  signedPayload,
+  signatures
+) {
+  const payloadBytes =
+    new TextEncoder().encode(
+      signedPayload
     );
 
   for (
-    let i = 0;
-    i < hex.length;
-    i += 2
+    const encodedSignature
+    of signatures
   ) {
-    bytes[i / 2] =
-      parseInt(
-        hex.slice(
-          i,
-          i + 2
-        ),
-        16
+    const signatureBytes =
+      base64ToBytes(
+        encodedSignature
       );
+
+    if (!signatureBytes) {
+      continue;
+    }
+
+    const valid =
+      await crypto.subtle.verify(
+        "HMAC",
+        key,
+        signatureBytes,
+        payloadBytes
+      );
+
+    if (valid) {
+      return true;
+    }
   }
 
-  return bytes;
+  return false;
+}
+
+
+function decodeStandardWebhookSecret(
+  secret
+) {
+  try {
+    let value =
+      String(secret).trim();
+
+    if (
+      value.startsWith(
+        "whsec_"
+      )
+    ) {
+      value =
+        value.slice(
+          "whsec_".length
+        );
+    }
+
+    if (!value) {
+      return null;
+    }
+
+    return base64ToBytes(
+      value
+    );
+
+  } catch (_) {
+    return null;
+  }
+}
+
+
+function base64ToBytes(
+  value
+) {
+  try {
+    const text =
+      String(value).trim();
+
+    if (!text) {
+      return null;
+    }
+
+    const binary =
+      atob(text);
+
+    const bytes =
+      new Uint8Array(
+        binary.length
+      );
+
+    for (
+      let i = 0;
+      i < binary.length;
+      i++
+    ) {
+      bytes[i] =
+        binary.charCodeAt(i);
+    }
+
+    return bytes;
+
+  } catch (_) {
+    return null;
+  }
 }
 
 
@@ -678,6 +790,9 @@ function getEventType(
     event?.type ||
     event?.event ||
     request.headers.get(
+      "webhook-event"
+    ) ||
+    request.headers.get(
       "X-Polar-Event"
     ) ||
     ""
@@ -688,15 +803,6 @@ function getEventType(
 function makeActivationKey(
   activation
 ) {
-  /*
-   * TEMPORARY IDENTITY:
-   *
-   * This uses the Polar checkout/order/subscription
-   * identifier as the server-side activation record.
-   *
-   * The extension should NOT use customer_id.
-   */
-
   const id =
     activation.checkoutId ||
     activation.orderId ||
@@ -719,12 +825,12 @@ function addDays(
 
   date.setTime(
     date.getTime() +
-    days *
-      24 *
-      60 *
-      60 *
-      1000
-  );
+      days *
+        24 *
+        60 *
+        60 *
+        1000
+    );
 
   return date.toISOString();
 }
@@ -735,9 +841,7 @@ function jsonResponse(
   status = 200
 ) {
   return new Response(
-    JSON.stringify(
-      data
-    ),
+    JSON.stringify(data),
     {
       status,
 
