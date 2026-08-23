@@ -808,7 +808,7 @@ function handleSuccessPage(url, env) {
 </div>
 <script>
 (function(){
-  const EXTENSION_ID = "dfbbngpobeclbnlgmomccloajmmpdldg";
+  const EXTENSION_ID = "gcbmcpgdiblomcbngbajjbdbkhfjdnon";
   const checkoutId = ${JSON.stringify(checkoutId)};
 
   function openDashboard() {
