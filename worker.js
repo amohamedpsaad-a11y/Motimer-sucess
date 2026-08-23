@@ -129,10 +129,25 @@ async function handlePolarWebhook(request, env) {
       );
 
     if (!valid) {
+      // ---------------------------------------------------
+      // TEMPORARY DEBUG BLOCK — remove once fixed.
+      // Computes the signature both ways and reports them
+      // alongside what Polar actually sent, so we can see
+      // exactly which one (if any) matches.
+      // ---------------------------------------------------
+      const debug = await debugSignature(
+        body,
+        webhookId,
+        webhookTimestamp,
+        webhookSignature,
+        env.POLAR_WEBHOOK_SECRET
+      );
+
       return jsonResponse(
         {
           ok: false,
           error: "Invalid webhook signature",
+          debug,
         },
         401
       );
@@ -859,6 +874,94 @@ async function verifyWebhookSignature(
   } catch (_) {
     return false;
   }
+}
+
+
+// =====================================================
+// DEBUG SIGNATURE (temporary — remove once fixed)
+// =====================================================
+
+async function computeSignatureVariant(signedPayload, keyBytes) {
+  try {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const sigBuf = await crypto.subtle.sign(
+      "HMAC",
+      key,
+      new TextEncoder().encode(signedPayload)
+    );
+    return bytesToBase64(new Uint8Array(sigBuf));
+  } catch (e) {
+    return "error: " + String(e?.message || e);
+  }
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+async function debugSignature(
+  body,
+  webhookId,
+  timestamp,
+  signatureHeader,
+  secret
+) {
+  const signedPayload = `${webhookId}.${timestamp}.${body}`;
+  const raw = String(secret).trim();
+  const stripped = raw.startsWith("whsec_")
+    ? raw.slice("whsec_".length)
+    : raw;
+
+  const variants = {};
+
+  // Variant A: strip prefix, base64-decode (original spec-style)
+  const bytesA = base64ToBytes(stripped);
+  variants.a_stripped_base64decoded = bytesA
+    ? await computeSignatureVariant(signedPayload, bytesA)
+    : "invalid base64";
+
+  // Variant B: strip prefix, raw UTF-8 bytes
+  const bytesB = new TextEncoder().encode(stripped);
+  variants.b_stripped_rawbytes = await computeSignatureVariant(
+    signedPayload,
+    bytesB
+  );
+
+  // Variant C: full secret incl. whsec_, raw UTF-8 bytes
+  const bytesC = new TextEncoder().encode(raw);
+  variants.c_full_rawbytes = await computeSignatureVariant(
+    signedPayload,
+    bytesC
+  );
+
+  // Variant D: full secret incl. whsec_, base64-decoded
+  const bytesD = base64ToBytes(raw);
+  variants.d_full_base64decoded = bytesD
+    ? await computeSignatureVariant(signedPayload, bytesD)
+    : "invalid base64";
+
+  return {
+    receivedSignatureHeader: signatureHeader,
+    parsedReceivedSignatures: parseSignatures(signatureHeader),
+    secretLength: raw.length,
+    strippedSecretLength: stripped.length,
+    bodyLength: body.length,
+    signedPayloadPreview:
+      signedPayload.length > 120
+        ? signedPayload.slice(0, 120) + "…"
+        : signedPayload,
+    computed: variants,
+  };
 }
 
 
