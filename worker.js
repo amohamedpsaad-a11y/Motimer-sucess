@@ -53,6 +53,17 @@ export default {
       return handleActivationStatus(url, env);
     }
 
+    // =================================================
+    // CHECKOUT SUCCESS PAGE
+    // =================================================
+
+    if (
+      url.pathname === "/success" &&
+      request.method === "GET"
+    ) {
+      return handleSuccessPage(url, env);
+    }
+
     return jsonResponse(
       {
         ok: false,
@@ -498,6 +509,10 @@ async function handleActivationStatus(
   // The extension passes either the Polar customer_id or the
   // connected Google account email here — both are indexed
   // under the same "activation:<key>" namespace by saveActivation().
+  //
+  // The success page (handleSuccessPage below) passes
+  // "checkout:<checkout_id>" instead, right after a purchase,
+  // before it knows the real customer_id yet.
   const raw =
     await env.MOTIMER_KV.get(
       `activation:${activationId}`
@@ -563,11 +578,135 @@ async function handleActivationStatus(
 
     daysRemaining,
 
+    // Included so the success page (which only knows the
+    // checkout_id) can learn the real customer_id and hand it
+    // to the extension. Non-secret: this is the same
+    // customer_id Polar already shows the buyer in their own
+    // account/receipt.
+    customerId:
+      activation.customerId || "",
+
     activatedAt:
       activation.activatedAt,
 
     expiresAt:
       activation.expiresAt,
+  });
+}
+
+
+// =====================================================
+// CHECKOUT SUCCESS PAGE
+// =====================================================
+//
+// Polar's Checkout Link "Success URL" should point here:
+//
+//   https://motimer-sucess.amohamedpsaad.workers.dev/success?checkout_id={CHECKOUT_ID}
+//
+// Polar substitutes {CHECKOUT_ID} automatically at redirect
+// time. This page polls our own /activation-status using
+// "checkout:<checkout_id>" (saved by saveActivation() as soon
+// as the order.paid webhook lands) until it finds the real
+// customer_id, then hands that customer_id to the extension
+// via chrome.runtime.sendMessage — matching manifest.json's
+// externally_connectable, which already allows this exact
+// Worker origin to message the extension.
+// =====================================================
+
+function handleSuccessPage(url, env) {
+  const checkoutId = String(
+    url.searchParams.get("checkout_id") || ""
+  ).trim();
+
+  const html = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motimer — تم الدفع</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#0b0f14;color:#e6edf3;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}
+  .card{max-width:420px;text-align:center}
+  h1{font-size:20px;margin-bottom:12px}
+  p{color:#9aa7b2;line-height:1.6}
+  .spinner{width:36px;height:36px;border:3px solid #263140;border-top-color:#4f9dff;border-radius:50%;margin:0 auto 20px;animation:spin 0.8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .ok{color:#3fd07a}
+  .err{color:#ff6b6b}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="spinner" id="spinner"></div>
+  <h1 id="title">جاري تفعيل اشتراكك…</h1>
+  <p id="msg">من فضلك متقفلش الصفحة دي.</p>
+</div>
+<script>
+(function(){
+  const EXTENSION_ID = "menmcfeoaehnhnmklhgnbhglkokknnfh";
+  const checkoutId = ${JSON.stringify(checkoutId)};
+  const titleEl = document.getElementById("title");
+  const msgEl = document.getElementById("msg");
+  const spinnerEl = document.getElementById("spinner");
+
+  function done(ok, title, msg) {
+    spinnerEl.style.display = "none";
+    titleEl.textContent = title;
+    titleEl.className = ok ? "ok" : "err";
+    msgEl.textContent = msg;
+  }
+
+  function sendToExtension(customerId) {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+      done(false, "افتح الصفحة دي من نفس المتصفح اللي فيه Motimer", "الإكستنشن مش متاح من المتصفح ده.");
+      return;
+    }
+    chrome.runtime.sendMessage(
+      EXTENSION_ID,
+      { type: "MOTIMER_ACTIVATE_LICENSE", customerId: customerId },
+      function (response) {
+        if (chrome.runtime.lastError || !response || !response.ok) {
+          done(false, "الدفع نجح، بس التفعيل التلقائي مايتحصلش", "افتح إعدادات Motimer ودوس Activate يدويًا.");
+          return;
+        }
+        done(true, "تم تفعيل اشتراكك بنجاح", "تقدر تقفل الصفحة دي دلوقتي وترجع لـ Motimer.");
+      }
+    );
+  }
+
+  async function pollForCustomerId(attempt) {
+    attempt = attempt || 0;
+    if (!checkoutId) {
+      done(false, "لينك مش صحيح", "الصفحة دي محتاجة تتفتح من رابط الدفع بتاع Polar.");
+      return;
+    }
+    try {
+      const res = await fetch("/activation-status?activation_id=" + encodeURIComponent("checkout:" + checkoutId), { cache: "no-store" });
+      const json = await res.json().catch(function(){ return {}; });
+      if (json && json.ok && json.customerId) {
+        sendToExtension(json.customerId);
+        return;
+      }
+    } catch (e) {}
+    if (attempt < 8) {
+      setTimeout(function () { pollForCustomerId(attempt + 1); }, 2000);
+    } else {
+      done(false, "لسه الدفع بيتأكد", "استنى شوية وافتح إعدادات Motimer، أو افتح الصفحة دي تاني.");
+    }
+  }
+
+  pollForCustomerId(0);
+})();
+</script>
+</body>
+</html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      ...CORS_HEADERS,
+    },
   });
 }
 
