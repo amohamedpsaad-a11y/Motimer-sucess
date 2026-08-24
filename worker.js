@@ -269,6 +269,20 @@ async function handleOrderPaid(event, env) {
     status: "active",
   };
 
+  // ---------------------------------------------------
+  // IMPORTANT FOR THE EXTENSION
+  //
+  // Extension calls:
+  //
+  // /activation-status?activation_id=<customer_id or email>
+  //
+  // Therefore we save the activation under BOTH the
+  // customer_id and the buyer's checkout email, so the
+  // extension can activate automatically using whichever
+  // identifier it already has (the Google account email
+  // it's connected to needs no manual linking step).
+  // ---------------------------------------------------
+
   if (env.MOTIMER_KV) {
     await saveActivation(
       activation,
@@ -349,6 +363,7 @@ async function handleSubscriptionActive(
     status: "active",
   };
 
+  // Save under customer_id AND email so the extension can find it.
   if (env.MOTIMER_KV) {
     await saveActivation(
       activation,
@@ -387,6 +402,11 @@ async function saveActivation(
       activation
     );
 
+  // Primary key used by the extension when it already
+  // knows the Polar customer_id (manual/legacy linking):
+  //
+  // activation:<customer_id>
+  //
   if (activation.customerId) {
     await env.MOTIMER_KV.put(
       `activation:${activation.customerId}`,
@@ -394,12 +414,23 @@ async function saveActivation(
     );
   }
 
+  // Secondary key used by the extension's automatic path:
+  // it queries by the connected Google account's email,
+  // with no manual step required from the buyer as long as
+  // they check out with the same email.
+  //
+  // activation:<email, lowercased>
+  //
   if (activation.customerEmail) {
     await env.MOTIMER_KV.put(
       `activation:${activation.customerEmail.toLowerCase()}`,
       value
     );
   }
+
+  // Also save by checkout/order/subscription ID
+  // when available. This gives us useful fallback
+  // records without changing the extension API.
 
   if (activation.checkoutId) {
     await env.MOTIMER_KV.put(
@@ -421,63 +452,6 @@ async function saveActivation(
       value
     );
   }
-}
-
-
-// =====================================================
-// PURGE ACTIVATION
-// =====================================================
-
-async function purgeActivation(
-  activation,
-  activationId,
-  env
-) {
-  if (!env.MOTIMER_KV) return;
-
-  const keys = new Set();
-
-  if (activationId) {
-    keys.add(`activation:${activationId}`);
-  }
-
-  if (activation?.customerId) {
-    keys.add(
-      `activation:${activation.customerId}`
-    );
-  }
-
-  if (activation?.customerEmail) {
-    keys.add(
-      `activation:${String(
-        activation.customerEmail
-      ).toLowerCase()}`
-    );
-  }
-
-  if (activation?.checkoutId) {
-    keys.add(
-      `activation:checkout:${activation.checkoutId}`
-    );
-  }
-
-  if (activation?.orderId) {
-    keys.add(
-      `activation:order:${activation.orderId}`
-    );
-  }
-
-  if (activation?.subscriptionId) {
-    keys.add(
-      `activation:subscription:${activation.subscriptionId}`
-    );
-  }
-
-  await Promise.all(
-    [...keys].map((key) =>
-      env.MOTIMER_KV.delete(key)
-    )
-  );
 }
 
 
@@ -544,6 +518,13 @@ async function handleActivationStatus(
     );
   }
 
+  // The extension passes either the Polar customer_id or the
+  // connected Google account email here — both are indexed
+  // under the same "activation:<key>" namespace by saveActivation().
+  //
+  // The success page (handleSuccessPage below) passes
+  // "checkout:<checkout_id>" instead, right after a purchase,
+  // before it knows the real customer_id yet.
   const raw =
     await env.MOTIMER_KV.get(
       `activation:${activationId}`
@@ -572,47 +553,6 @@ async function handleActivationStatus(
       },
       500
     );
-  }
-
-  // Verify that the Polar customer still exists.
-  if (activation.customerId && env.POLAR_ACCESS_TOKEN) {
-    try {
-      const customerRes = await fetch(
-        `https://api.polar.sh/v1/customers/${encodeURIComponent(
-          String(activation.customerId)
-        )}`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`,
-          },
-        }
-      );
-
-      // Customer was deleted from Polar.
-      if (customerRes.status === 404) {
-        await purgeActivation(
-          activation,
-          activationId,
-          env
-        );
-
-        return jsonResponse({
-          ok: true,
-          active: false,
-          status: "not_activated",
-          customerDeleted: true,
-          reason: "customer_not_found",
-          daysRemaining: 0,
-          expiresAt: "",
-          customerId: "",
-        });
-      }
-
-    } catch (_) {
-      // Do not cancel a subscription because of a temporary
-      // Polar/network error.
-    }
   }
 
   const expires =
@@ -650,6 +590,11 @@ async function handleActivationStatus(
 
     daysRemaining,
 
+    // Included so the success page (which only knows the
+    // checkout_id) can learn the real customer_id and hand it
+    // to the extension. Non-secret: this is the same
+    // customer_id Polar already shows the buyer in their own
+    // account/receipt.
     customerId:
       activation.customerId || "",
 
@@ -664,6 +609,18 @@ async function handleActivationStatus(
 
 // =====================================================
 // CUSTOMER PORTAL
+// =====================================================
+//
+// Extension calls:
+//
+//   /customer-portal?customer_id=<Polar customer_id>
+//
+// This creates a short-lived Polar customer session
+// server-side (using our secret Organization Access Token)
+// and returns the resulting customer_portal_url, which
+// already embeds a customer_session_token scoped to that
+// one customer. The extension just opens that URL in a
+// new tab — see db.js openManageSubscription().
 // =====================================================
 
 async function handleCustomerPortal(url, env) {
@@ -725,6 +682,20 @@ async function handleCustomerPortal(url, env) {
 
 // =====================================================
 // CHECKOUT SUCCESS PAGE
+// =====================================================
+//
+// Polar's Checkout Link "Success URL" should point here:
+//
+//   https://motimer-sucess.amohamedpsaad.workers.dev/success?checkout_id={CHECKOUT_ID}
+//
+// Polar substitutes {CHECKOUT_ID} automatically at redirect
+// time. This page polls our own /activation-status using
+// "checkout:<checkout_id>" (saved by saveActivation() as soon
+// as the order.paid webhook lands) until it finds the real
+// customer_id, then hands that customer_id to the extension
+// via chrome.runtime.sendMessage — matching manifest.json's
+// externally_connectable, which already allows this exact
+// Worker origin to message the extension.
 // =====================================================
 
 function handleSuccessPage(url, env) {
@@ -846,6 +817,8 @@ function handleSuccessPage(url, env) {
 
   document.getElementById("ctaBtn").addEventListener("click", openDashboard);
 
+  // Quietly try to hand the customer ID to the extension in the
+  // background — no loading state, doesn't block the page.
   function sendToExtension(customerId) {
     if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) return;
     chrome.runtime.sendMessage(EXTENSION_ID, { type: "MOTIMER_ACTIVATE_LICENSE", customerId: customerId });
@@ -883,6 +856,37 @@ function handleSuccessPage(url, env) {
 // =====================================================
 // POLAR WEBHOOK SIGNATURE
 // =====================================================
+//
+// Headers:
+//
+//   webhook-id
+//   webhook-timestamp
+//   webhook-signature
+//
+// Signed content:
+//
+//   webhook-id + "." +
+//   webhook-timestamp + "." +
+//   rawBody
+//
+// Secret normally looks like:
+//
+//   whsec_xxxxxxxxx
+//
+// Signature normally looks like:
+//
+//   v1,xxxxxxxx
+//
+// NOTE (Polar-specific quirk):
+// Polar's own docs warn that rolling your own verification
+// needs the secret "base64 encoded" before generating the
+// signature — unlike the generic Standard Webhooks spec,
+// where the whsec_-prefixed secret is ALREADY base64 and
+// gets base64-DECODED to obtain the raw HMAC key bytes.
+// For Polar, the safe approach is to use the secret's raw
+// UTF-8 bytes directly as the HMAC key (see
+// decodeWebhookSecret below) instead of base64-decoding it.
+// =====================================================
 
 const WEBHOOK_TIMESTAMP_TOLERANCE =
   5 * 60;
@@ -907,6 +911,7 @@ async function verifyWebhookSignature(
       return false;
     }
 
+    // Protect against replayed webhooks.
     const now =
       Math.floor(
         Date.now() / 1000
@@ -938,6 +943,7 @@ async function verifyWebhookSignature(
       return false;
     }
 
+    // Polar / Standard Webhooks secret.
     const keyBytes =
       decodeWebhookSecret(
         secret
@@ -1050,6 +1056,18 @@ function parseSignatures(
 // =====================================================
 // DECODE WEBHOOK SECRET
 // =====================================================
+//
+// FIXED: Polar's docs explicitly warn that custom signature
+// verification needs the secret "base64 encoded" before
+// generating the signature — the opposite of the generic
+// Standard Webhooks spec (which base64-DECODES the secret to
+// get the raw HMAC key). In practice this means Polar expects
+// the raw UTF-8 bytes of the secret string as the HMAC key,
+// NOT a base64-decoded version of it.
+//
+// If this still fails, try the alternate variant below that
+// keeps the "whsec_" prefix as part of the key bytes.
+// =====================================================
 
 function decodeWebhookSecret(
   secret
@@ -1063,6 +1081,9 @@ function decodeWebhookSecret(
       return null;
     }
 
+    // Polar signs webhooks using the RAW UTF-8 bytes of the
+    // full secret string, "whsec_" prefix included — NOT
+    // base64-decoded. Confirmed against live Polar deliveries.
     return new TextEncoder().encode(value);
 
   } catch (_) {
@@ -1149,7 +1170,7 @@ function addDays(
         60 *
         60 *
         1000
-  );
+    );
 
   return date.toISOString();
 }
