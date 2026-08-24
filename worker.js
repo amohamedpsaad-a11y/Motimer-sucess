@@ -189,6 +189,34 @@ async function handlePolarWebhook(request, env) {
       );
     }
 
+    // =================================================
+    // SUBSCRIPTION REVOKED (deleting a customer from the
+    // dashboard revokes their subscription immediately, which
+    // fires this event — see handleSubscriptionRevoked below)
+    // =================================================
+
+    if (
+      eventType === "subscription.revoked"
+    ) {
+      return handleSubscriptionRevoked(
+        event,
+        env
+      );
+    }
+
+    // =================================================
+    // CUSTOMER DELETED
+    // =================================================
+
+    if (
+      eventType === "customer.deleted"
+    ) {
+      return handleCustomerDeleted(
+        event,
+        env
+      );
+    }
+
     // Accept other events.
     return jsonResponse({
       ok: true,
@@ -387,6 +415,124 @@ async function handleSubscriptionActive(
     expiresAt:
       periodEnd,
   });
+}
+
+
+// =====================================================
+// SUBSCRIPTION REVOKED
+// =====================================================
+//
+// Fired the moment access should actually stop — including when
+// a merchant deletes a customer from the dashboard, which Polar
+// treats as an immediate revocation of that customer's active
+// subscription. We deliberately do NOT act on subscription.canceled
+// (that only means "won't renew"; the customer keeps access until
+// the paid period ends) — only .revoked, which means access is
+// gone right now. We clear our own KV cache immediately so the
+// extension's next check reports "not subscribed" instead of
+// riding out the old cached expiresAt.
+// =====================================================
+
+async function handleSubscriptionRevoked(
+  event,
+  env
+) {
+  const data =
+    event?.data || event;
+
+  const customerId =
+    getCustomerId(data);
+
+  const customerEmail =
+    getCustomerEmail(data);
+
+  if (env.MOTIMER_KV) {
+    await clearActivationCache(
+      customerId,
+      customerEmail,
+      env
+    );
+  }
+
+  return jsonResponse({
+    ok: true,
+    event: "subscription.revoked",
+    cleared: true,
+    customerId,
+    customerEmail,
+  });
+}
+
+
+// =====================================================
+// CUSTOMER DELETED
+// =====================================================
+//
+// Belt-and-suspenders alongside subscription.revoked above: if a
+// customer is deleted before/without a subscription.revoked event
+// reaching us for any reason, this still clears the cached
+// activation so the extension stops reporting it as active.
+// =====================================================
+
+async function handleCustomerDeleted(
+  event,
+  env
+) {
+  const data =
+    event?.data || event;
+
+  const customerId =
+    getCustomerId(data);
+
+  const customerEmail =
+    getCustomerEmail(data);
+
+  if (env.MOTIMER_KV) {
+    await clearActivationCache(
+      customerId,
+      customerEmail,
+      env
+    );
+  }
+
+  return jsonResponse({
+    ok: true,
+    event: "customer.deleted",
+    cleared: true,
+    customerId,
+    customerEmail,
+  });
+}
+
+
+// =====================================================
+// CLEAR ACTIVATION CACHE
+// =====================================================
+
+async function clearActivationCache(
+  customerId,
+  customerEmail,
+  env
+) {
+  const deletes = [];
+
+  if (customerId) {
+    deletes.push(
+      env.MOTIMER_KV.delete(
+        `activation:${customerId}`
+      )
+    );
+  }
+
+  if (customerEmail) {
+    deletes.push(
+      env.MOTIMER_KV.delete(
+        `activation:${customerEmail.toLowerCase()}`
+      )
+    );
+  }
+
+  await Promise.all(deletes).catch(() => {});
 }
 
 
@@ -597,19 +743,51 @@ async function handleActivationStatus(
 
   // For real customer_id/email keys: don't just trust a non-expired
   // cache blindly — confirm it against Polar live first. This is what
-  // catches a customer being deleted and re-created (new customer_id)
-  // outside of any webhook. If the live check fails or Polar is
-  // unreachable, fall back to the cached record instead of reporting
-  // the user as inactive.
+  // catches a customer being deleted (or deleted + re-created, which
+  // issues a new customer_id) outside of any webhook.
+  //
+  // IMPORTANT: lookupActivationFromPolar() distinguishes "Polar
+  // answered and there is no active subscription" (checked: true,
+  // activation: null) from "we couldn't get a real answer from Polar
+  // right now" (checked: false, e.g. network error / no API token).
+  // Only the second case falls back to the stale cache — the first
+  // case is authoritative and must win even if the cache's expiresAt
+  // hasn't passed yet. Treating "no match found" the same as "network
+  // error" was exactly the bug: deleting a customer in the Polar
+  // dashboard doesn't retroactively rewrite our cached expiresAt, so
+  // trusting the cache here kept reporting a deleted customer as
+  // active with days left until it happened to expire on its own.
   const live = await lookupActivationFromPolar(activationId, env);
 
-  if (live) {
-    if (!cached || live.customerId !== cached.customerId) {
-      await saveActivation(live, env);
+  if (live.checked) {
+    if (live.activation) {
+      if (!cached || live.activation.customerId !== cached.customerId) {
+        await saveActivation(live.activation, env);
+      }
+      return activationStatusResponse(live.activation);
     }
-    return activationStatusResponse(live);
+
+    // Polar definitively has no active subscription for this
+    // customer/email (deleted customer, revoked/expired subscription,
+    // etc). Drop the stale cache so this doesn't keep resurfacing on
+    // future lookups either.
+    if (env.MOTIMER_KV) {
+      await env.MOTIMER_KV
+        .delete(`activation:${activationId}`)
+        .catch(() => {});
+    }
+
+    return jsonResponse({
+      ok: true,
+      active: false,
+      status: "not_activated",
+      daysRemaining: 0,
+      expiresAt: "",
+    });
   }
 
+  // Live check unavailable (network error, missing token, Polar
+  // unreachable) — this is the only case where the cache is trusted.
   if (cached && cachedStillActive) {
     return activationStatusResponse(cached);
   }
@@ -655,13 +833,24 @@ function activationStatusResponse(activation) {
 // =====================================================
 //
 // activationId is either a Polar customer_id or an email
-// (lowercased). Returns an activation object shaped like the
-// ones saveActivation() writes, or null if Polar has no active
-// subscription for it.
+// (lowercased).
+//
+// Returns { checked, activation }:
+//   - checked: true  -> Polar gave us a real, trustworthy answer.
+//              activation is either the active-subscription object
+//              (shaped like what saveActivation() writes), or null
+//              if Polar confirms there is nothing active (customer
+//              not found / customer has no active subscriptions).
+//              Callers should treat "checked: true, activation: null"
+//              as authoritative, NOT as "unknown, fall back to cache".
+//   - checked: false -> we could not get a real answer from Polar
+//              (no API token configured, network error, non-OK
+//              response). activation is always null here. Callers
+//              may fall back to a cached record in this case only.
 // =====================================================
 
 async function lookupActivationFromPolar(activationId, env) {
-  if (!env.POLAR_ACCESS_TOKEN) return null;
+  if (!env.POLAR_ACCESS_TOKEN) return { checked: false, activation: null };
 
   const isEmail = activationId.includes("@");
   let customerId = isEmail ? "" : activationId;
@@ -676,14 +865,23 @@ async function lookupActivationFromPolar(activationId, env) {
           },
         }
       );
-      if (!res.ok) return null;
+      // A non-OK response here means we couldn't actually ask Polar
+      // (auth issue, Polar down, etc) — NOT "no such customer". Don't
+      // treat it as a confirmed "inactive".
+      if (!res.ok) return { checked: false, activation: null };
+
       const data = await res.json().catch(() => ({}));
       const match = Array.isArray(data?.items) ? data.items[0] : null;
-      if (!match?.id) return null;
+
+      // Polar successfully answered: no customer exists with this
+      // email at all (e.g. deleted from the dashboard). This IS a
+      // confirmed answer.
+      if (!match?.id) return { checked: true, activation: null };
+
       customerId = String(match.id);
     }
 
-    if (!customerId) return null;
+    if (!customerId) return { checked: false, activation: null };
 
     const stateRes = await fetch(
       `${POLAR_API_BASE}/customers/${encodeURIComponent(customerId)}/state`,
@@ -693,13 +891,22 @@ async function lookupActivationFromPolar(activationId, env) {
         },
       }
     );
-    if (!stateRes.ok) return null;
+
+    // A 404 here is Polar confirming the customer_id no longer
+    // exists (deleted). Any other non-OK status is an unreliable
+    // answer (rate limit, outage, etc).
+    if (stateRes.status === 404) return { checked: true, activation: null };
+    if (!stateRes.ok) return { checked: false, activation: null };
+
     const state = await stateRes.json().catch(() => ({}));
 
     const activeSubs = Array.isArray(state?.active_subscriptions)
       ? state.active_subscriptions
       : [];
-    if (activeSubs.length === 0) return null;
+
+    // Polar successfully answered: this customer exists but currently
+    // has no active subscription (revoked/canceled/expired). Confirmed.
+    if (activeSubs.length === 0) return { checked: true, activation: null };
 
     // Prefer the subscription with the furthest-out period end.
     const sub = activeSubs.reduce((best, s) => {
@@ -718,16 +925,19 @@ async function lookupActivationFromPolar(activationId, env) {
       sub.current_period_end || addDays(periodStart, SUBSCRIPTION_DAYS);
 
     return {
-      ok: true,
-      subscriptionId: String(sub.id || ""),
-      customerId,
-      customerEmail: String(state?.email || activationId || "").toLowerCase(),
-      activatedAt: periodStart,
-      expiresAt: periodEnd,
-      status: "active",
+      checked: true,
+      activation: {
+        ok: true,
+        subscriptionId: String(sub.id || ""),
+        customerId,
+        customerEmail: String(state?.email || activationId || "").toLowerCase(),
+        activatedAt: periodStart,
+        expiresAt: periodEnd,
+        status: "active",
+      },
     };
   } catch (_) {
-    return null;
+    return { checked: false, activation: null };
   }
 }
 
