@@ -12,7 +12,6 @@
 //   MOTIMER_KV
 
 const SUBSCRIPTION_DAYS = 30;
-const POLAR_API_BASE = "https://api.polar.sh/v1";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -184,34 +183,6 @@ async function handlePolarWebhook(request, env) {
       eventType === "subscription.active"
     ) {
       return handleSubscriptionActive(
-        event,
-        env
-      );
-    }
-
-    // =================================================
-    // SUBSCRIPTION REVOKED (deleting a customer from the
-    // dashboard revokes their subscription immediately, which
-    // fires this event — see handleSubscriptionRevoked below)
-    // =================================================
-
-    if (
-      eventType === "subscription.revoked"
-    ) {
-      return handleSubscriptionRevoked(
-        event,
-        env
-      );
-    }
-
-    // =================================================
-    // CUSTOMER DELETED
-    // =================================================
-
-    if (
-      eventType === "customer.deleted"
-    ) {
-      return handleCustomerDeleted(
         event,
         env
       );
@@ -419,124 +390,6 @@ async function handleSubscriptionActive(
 
 
 // =====================================================
-// SUBSCRIPTION REVOKED
-// =====================================================
-//
-// Fired the moment access should actually stop — including when
-// a merchant deletes a customer from the dashboard, which Polar
-// treats as an immediate revocation of that customer's active
-// subscription. We deliberately do NOT act on subscription.canceled
-// (that only means "won't renew"; the customer keeps access until
-// the paid period ends) — only .revoked, which means access is
-// gone right now. We clear our own KV cache immediately so the
-// extension's next check reports "not subscribed" instead of
-// riding out the old cached expiresAt.
-// =====================================================
-
-async function handleSubscriptionRevoked(
-  event,
-  env
-) {
-  const data =
-    event?.data || event;
-
-  const customerId =
-    getCustomerId(data);
-
-  const customerEmail =
-    getCustomerEmail(data);
-
-  if (env.MOTIMER_KV) {
-    await clearActivationCache(
-      customerId,
-      customerEmail,
-      env
-    );
-  }
-
-  return jsonResponse({
-    ok: true,
-    event: "subscription.revoked",
-    cleared: true,
-    customerId,
-    customerEmail,
-  });
-}
-
-
-// =====================================================
-// CUSTOMER DELETED
-// =====================================================
-//
-// Belt-and-suspenders alongside subscription.revoked above: if a
-// customer is deleted before/without a subscription.revoked event
-// reaching us for any reason, this still clears the cached
-// activation so the extension stops reporting it as active.
-// =====================================================
-
-async function handleCustomerDeleted(
-  event,
-  env
-) {
-  const data =
-    event?.data || event;
-
-  const customerId =
-    getCustomerId(data);
-
-  const customerEmail =
-    getCustomerEmail(data);
-
-  if (env.MOTIMER_KV) {
-    await clearActivationCache(
-      customerId,
-      customerEmail,
-      env
-    );
-  }
-
-  return jsonResponse({
-    ok: true,
-    event: "customer.deleted",
-    cleared: true,
-    customerId,
-    customerEmail,
-  });
-}
-
-
-// =====================================================
-// CLEAR ACTIVATION CACHE
-// =====================================================
-
-async function clearActivationCache(
-  customerId,
-  customerEmail,
-  env
-) {
-  const deletes = [];
-
-  if (customerId) {
-    deletes.push(
-      env.MOTIMER_KV.delete(
-        `activation:${customerId}`
-      )
-    );
-  }
-
-  if (customerEmail) {
-    deletes.push(
-      env.MOTIMER_KV.delete(
-        `activation:${customerEmail.toLowerCase()}`
-      )
-    );
-  }
-
-  await Promise.all(deletes).catch(() => {});
-}
-
-
-// =====================================================
 // SAVE ACTIVATION
 // =====================================================
 
@@ -633,33 +486,6 @@ function getCustomerEmail(data) {
 // =====================================================
 // ACTIVATION STATUS
 // =====================================================
-//
-// This used to ONLY read from MOTIMER_KV, which is populated
-// exclusively by the /polar-webhook handler above. That means
-// if a webhook delivery is ever missed, arrives late, or gets
-// rejected (e.g. signature verification), the KV record never
-// exists and the extension has no way to recover — it just
-// gets "couldn't be automatically re-linked" forever, even
-// though Polar itself shows the customer as active.
-//
-// To make this resilient, if KV has no record (or an expired
-// one) we now fall back to asking Polar directly, in real time,
-// and backfill KV so future lookups are fast again.
-//
-// FIX (customer delete + re-create in Polar dashboard):
-// A cached KV record can be "not expired" per its stored
-// expiresAt, yet still point at a customerId that Polar no
-// longer recognizes — e.g. when someone deletes the Polar
-// customer and re-adds them (a new customer_id is issued) with
-// no order.paid/subscription.active webhook ever firing for
-// that action. Previously we returned the stale cached
-// customerId as-is whenever "stillActive" was true, so the
-// extension kept getting handed back the same dead id forever.
-// Now, for email-keyed lookups, we always re-verify against
-// Polar live before trusting the cache, and only fall back to
-// the cached record if that live check itself fails/is
-// unavailable.
-// =====================================================
 
 async function handleActivationStatus(
   url,
@@ -692,11 +518,6 @@ async function handleActivationStatus(
     );
   }
 
-  const isInternalKey =
-    activationId.startsWith("checkout:") ||
-    activationId.startsWith("order:") ||
-    activationId.startsWith("subscription:");
-
   // The extension passes either the Polar customer_id or the
   // connected Google account email here — both are indexed
   // under the same "activation:<key>" namespace by saveActivation().
@@ -709,29 +530,7 @@ async function handleActivationStatus(
       `activation:${activationId}`
     );
 
-  let cached = null;
-  let cachedStillActive = false;
-
-  if (raw) {
-    try {
-      cached = JSON.parse(raw);
-      cachedStillActive =
-        new Date(cached.expiresAt).getTime() > Date.now();
-    } catch (_) {
-      return jsonResponse(
-        { ok: false, error: "Invalid activation data" },
-        500
-      );
-    }
-  }
-
-  // Internal prefixed keys (checkout:/order:/subscription:) aren't
-  // something Polar's API can look up directly, so for those we can
-  // only ever trust the cache.
-  if (isInternalKey) {
-    if (cached && cachedStillActive) {
-      return activationStatusResponse(cached);
-    }
+  if (!raw) {
     return jsonResponse({
       ok: true,
       active: false,
@@ -741,204 +540,70 @@ async function handleActivationStatus(
     });
   }
 
-  // For real customer_id/email keys: don't just trust a non-expired
-  // cache blindly — confirm it against Polar live first. This is what
-  // catches a customer being deleted (or deleted + re-created, which
-  // issues a new customer_id) outside of any webhook.
-  //
-  // IMPORTANT: lookupActivationFromPolar() distinguishes "Polar
-  // answered and there is no active subscription" (checked: true,
-  // activation: null) from "we couldn't get a real answer from Polar
-  // right now" (checked: false, e.g. network error / no API token).
-  // Only the second case falls back to the stale cache — the first
-  // case is authoritative and must win even if the cache's expiresAt
-  // hasn't passed yet. Treating "no match found" the same as "network
-  // error" was exactly the bug: deleting a customer in the Polar
-  // dashboard doesn't retroactively rewrite our cached expiresAt, so
-  // trusting the cache here kept reporting a deleted customer as
-  // active with days left until it happened to expire on its own.
-  const live = await lookupActivationFromPolar(activationId, env);
+  let activation;
 
-  if (live.checked) {
-    if (live.activation) {
-      if (!cached || live.activation.customerId !== cached.customerId) {
-        await saveActivation(live.activation, env);
-      }
-      return activationStatusResponse(live.activation);
-    }
-
-    // Polar definitively has no active subscription for this
-    // customer/email (deleted customer, revoked/expired subscription,
-    // etc). Drop the stale cache so this doesn't keep resurfacing on
-    // future lookups either.
-    if (env.MOTIMER_KV) {
-      await env.MOTIMER_KV
-        .delete(`activation:${activationId}`)
-        .catch(() => {});
-    }
-
-    return jsonResponse({
-      ok: true,
-      active: false,
-      status: "not_activated",
-      daysRemaining: 0,
-      expiresAt: "",
-    });
+  try {
+    activation =
+      JSON.parse(raw);
+  } catch (_) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "Invalid activation data",
+      },
+      500
+    );
   }
 
-  // Live check unavailable (network error, missing token, Polar
-  // unreachable) — this is the only case where the cache is trusted.
-  if (cached && cachedStillActive) {
-    return activationStatusResponse(cached);
-  }
+  const expires =
+    new Date(
+      activation.expiresAt
+    ).getTime();
+
+  const now =
+    Date.now();
+
+  const remainingMs =
+    expires - now;
+
+  const daysRemaining =
+    Math.max(
+      0,
+      Math.ceil(
+        remainingMs /
+          (1000 * 60 * 60 * 24)
+      )
+    );
+
+  const active =
+    remainingMs > 0;
 
   return jsonResponse({
     ok: true,
-    active: false,
-    status: "not_activated",
-    daysRemaining: 0,
-    expiresAt: "",
-  });
-}
 
-function activationStatusResponse(activation) {
-  const expires = new Date(activation.expiresAt).getTime();
-  const now = Date.now();
-  const remainingMs = expires - now;
-  const daysRemaining = Math.max(
-    0,
-    Math.ceil(remainingMs / (1000 * 60 * 60 * 24))
-  );
-  const active = remainingMs > 0;
-
-  return jsonResponse({
-    ok: true,
     active,
-    status: active ? "active" : "expired",
+
+    status:
+      active
+        ? "active"
+        : "expired",
+
     daysRemaining,
+
     // Included so the success page (which only knows the
     // checkout_id) can learn the real customer_id and hand it
     // to the extension. Non-secret: this is the same
     // customer_id Polar already shows the buyer in their own
     // account/receipt.
-    customerId: activation.customerId || "",
-    activatedAt: activation.activatedAt,
-    expiresAt: activation.expiresAt,
+    customerId:
+      activation.customerId || "",
+
+    activatedAt:
+      activation.activatedAt,
+
+    expiresAt:
+      activation.expiresAt,
   });
-}
-
-
-// =====================================================
-// LIVE POLAR LOOKUP (fallback when KV/webhook has nothing)
-// =====================================================
-//
-// activationId is either a Polar customer_id or an email
-// (lowercased).
-//
-// Returns { checked, activation }:
-//   - checked: true  -> Polar gave us a real, trustworthy answer.
-//              activation is either the active-subscription object
-//              (shaped like what saveActivation() writes), or null
-//              if Polar confirms there is nothing active (customer
-//              not found / customer has no active subscriptions).
-//              Callers should treat "checked: true, activation: null"
-//              as authoritative, NOT as "unknown, fall back to cache".
-//   - checked: false -> we could not get a real answer from Polar
-//              (no API token configured, network error, non-OK
-//              response). activation is always null here. Callers
-//              may fall back to a cached record in this case only.
-// =====================================================
-
-async function lookupActivationFromPolar(activationId, env) {
-  if (!env.POLAR_ACCESS_TOKEN) return { checked: false, activation: null };
-
-  const isEmail = activationId.includes("@");
-  let customerId = isEmail ? "" : activationId;
-
-  try {
-    if (isEmail) {
-      const res = await fetch(
-        `${POLAR_API_BASE}/customers?email=${encodeURIComponent(activationId)}&limit=1`,
-        {
-          headers: {
-            Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`,
-          },
-        }
-      );
-      // A non-OK response here means we couldn't actually ask Polar
-      // (auth issue, Polar down, etc) — NOT "no such customer". Don't
-      // treat it as a confirmed "inactive".
-      if (!res.ok) return { checked: false, activation: null };
-
-      const data = await res.json().catch(() => ({}));
-      const match = Array.isArray(data?.items) ? data.items[0] : null;
-
-      // Polar successfully answered: no customer exists with this
-      // email at all (e.g. deleted from the dashboard). This IS a
-      // confirmed answer.
-      if (!match?.id) return { checked: true, activation: null };
-
-      customerId = String(match.id);
-    }
-
-    if (!customerId) return { checked: false, activation: null };
-
-    const stateRes = await fetch(
-      `${POLAR_API_BASE}/customers/${encodeURIComponent(customerId)}/state`,
-      {
-        headers: {
-          Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`,
-        },
-      }
-    );
-
-    // A 404 here is Polar confirming the customer_id no longer
-    // exists (deleted). Any other non-OK status is an unreliable
-    // answer (rate limit, outage, etc).
-    if (stateRes.status === 404) return { checked: true, activation: null };
-    if (!stateRes.ok) return { checked: false, activation: null };
-
-    const state = await stateRes.json().catch(() => ({}));
-
-    const activeSubs = Array.isArray(state?.active_subscriptions)
-      ? state.active_subscriptions
-      : [];
-
-    // Polar successfully answered: this customer exists but currently
-    // has no active subscription (revoked/canceled/expired). Confirmed.
-    if (activeSubs.length === 0) return { checked: true, activation: null };
-
-    // Prefer the subscription with the furthest-out period end.
-    const sub = activeSubs.reduce((best, s) => {
-      const end = new Date(
-        s.current_period_end || s.ended_at || 0
-      ).getTime();
-      const bestEnd = new Date(
-        best?.current_period_end || best?.ended_at || 0
-      ).getTime();
-      return end > bestEnd ? s : best;
-    }, activeSubs[0]);
-
-    const periodStart =
-      sub.current_period_start || sub.started_at || new Date().toISOString();
-    const periodEnd =
-      sub.current_period_end || addDays(periodStart, SUBSCRIPTION_DAYS);
-
-    return {
-      checked: true,
-      activation: {
-        ok: true,
-        subscriptionId: String(sub.id || ""),
-        customerId,
-        customerEmail: String(state?.email || activationId || "").toLowerCase(),
-        activatedAt: periodStart,
-        expiresAt: periodEnd,
-        status: "active",
-      },
-    };
-  } catch (_) {
-    return { checked: false, activation: null };
-  }
 }
 
 
@@ -1278,60 +943,56 @@ async function verifyWebhookSignature(
       return false;
     }
 
-    // Polar / Standard Webhooks secret. Try every candidate key
-    // interpretation rather than betting on just one — webhook
-    // delivery silently failing (401) is exactly what caused this
-    // whole bug, so this verification must not be a single point
-    // of failure again.
-    const keyCandidates =
-      decodeWebhookSecretCandidates(secret);
+    // Polar / Standard Webhooks secret.
+    const keyBytes =
+      decodeWebhookSecret(
+        secret
+      );
 
-    if (keyCandidates.length === 0) {
+    if (!keyBytes) {
       return false;
     }
+
+    const key =
+      await crypto.subtle.importKey(
+        "raw",
+        keyBytes,
+        {
+          name: "HMAC",
+          hash: "SHA-256",
+        },
+        false,
+        ["verify"]
+      );
 
     const payloadBytes =
       new TextEncoder().encode(
         signedPayload
       );
 
-    for (const keyBytes of keyCandidates) {
-      const key =
-        await crypto.subtle.importKey(
-          "raw",
-          keyBytes,
-          {
-            name: "HMAC",
-            hash: "SHA-256",
-          },
-          false,
-          ["verify"]
+    for (
+      const signature
+      of signatures
+    ) {
+      const signatureBytes =
+        base64ToBytes(
+          signature
         );
 
-      for (
-        const signature
-        of signatures
-      ) {
-        const signatureBytes =
-          base64ToBytes(
-            signature
-          );
+      if (!signatureBytes) {
+        continue;
+      }
 
-        if (!signatureBytes) {
-          continue;
-        }
+      const valid =
+        await crypto.subtle.verify(
+          "HMAC",
+          key,
+          signatureBytes,
+          payloadBytes
+        );
 
-        const valid =
-          await crypto.subtle.verify(
-            "HMAC",
-            key,
-            signatureBytes,
-            payloadBytes
-          );
-
-        if (valid) {
-          return true;
-        }
+      if (valid) {
+        return true;
       }
     }
 
@@ -1393,40 +1054,41 @@ function parseSignatures(
 
 
 // =====================================================
-// DECODE WEBHOOK SECRET — candidate HMAC keys
+// DECODE WEBHOOK SECRET
 // =====================================================
 //
-// Different implementations disagree on exactly how the
-// whsec_-prefixed secret becomes HMAC key bytes. Rather than
-// gamble on one interpretation (which is how this broke last
-// time), we try the plausible candidates in order and let
-// signature verification itself decide which one is right:
+// FIXED: Polar's docs explicitly warn that custom signature
+// verification needs the secret "base64 encoded" before
+// generating the signature — the opposite of the generic
+// Standard Webhooks spec (which base64-DECODES the secret to
+// get the raw HMAC key). In practice this means Polar expects
+// the raw UTF-8 bytes of the secret string as the HMAC key,
+// NOT a base64-decoded version of it.
 //
-//  1. Standard Webhooks spec (svix-compatible, which Polar's
-//     webhook format follows): strip "whsec_", base64-decode
-//     the rest to get the raw key bytes.
-//  2. Raw UTF-8 bytes of the secret with "whsec_" stripped.
-//  3. Raw UTF-8 bytes of the full secret string, prefix
-//     included.
+// If this still fails, try the alternate variant below that
+// keeps the "whsec_" prefix as part of the key bytes.
 // =====================================================
 
-function decodeWebhookSecretCandidates(secret) {
-  const value = String(secret || "").trim();
-  if (!value) return [];
+function decodeWebhookSecret(
+  secret
+) {
+  try {
+    const value =
+      String(secret)
+        .trim();
 
-  const withoutPrefix = value.startsWith("whsec_")
-    ? value.slice("whsec_".length)
-    : value;
+    if (!value) {
+      return null;
+    }
 
-  const candidates = [];
+    // Polar signs webhooks using the RAW UTF-8 bytes of the
+    // full secret string, "whsec_" prefix included — NOT
+    // base64-decoded. Confirmed against live Polar deliveries.
+    return new TextEncoder().encode(value);
 
-  const base64Decoded = base64ToBytes(withoutPrefix);
-  if (base64Decoded) candidates.push(base64Decoded);
-
-  candidates.push(new TextEncoder().encode(withoutPrefix));
-  candidates.push(new TextEncoder().encode(value));
-
-  return candidates;
+  } catch (_) {
+    return null;
+  }
 }
 
 
