@@ -499,6 +499,20 @@ function getCustomerEmail(data) {
 // To make this resilient, if KV has no record (or an expired
 // one) we now fall back to asking Polar directly, in real time,
 // and backfill KV so future lookups are fast again.
+//
+// FIX (customer delete + re-create in Polar dashboard):
+// A cached KV record can be "not expired" per its stored
+// expiresAt, yet still point at a customerId that Polar no
+// longer recognizes — e.g. when someone deletes the Polar
+// customer and re-adds them (a new customer_id is issued) with
+// no order.paid/subscription.active webhook ever firing for
+// that action. Previously we returned the stale cached
+// customerId as-is whenever "stillActive" was true, so the
+// extension kept getting handed back the same dead id forever.
+// Now, for email-keyed lookups, we always re-verify against
+// Polar live before trusting the cache, and only fall back to
+// the cached record if that live check itself fails/is
+// unavailable.
 // =====================================================
 
 async function handleActivationStatus(
@@ -532,6 +546,11 @@ async function handleActivationStatus(
     );
   }
 
+  const isInternalKey =
+    activationId.startsWith("checkout:") ||
+    activationId.startsWith("order:") ||
+    activationId.startsWith("subscription:");
+
   // The extension passes either the Polar customer_id or the
   // connected Google account email here — both are indexed
   // under the same "activation:<key>" namespace by saveActivation().
@@ -544,42 +563,55 @@ async function handleActivationStatus(
       `activation:${activationId}`
     );
 
+  let cached = null;
+  let cachedStillActive = false;
+
   if (raw) {
-    let activation;
     try {
-      activation = JSON.parse(raw);
+      cached = JSON.parse(raw);
+      cachedStillActive =
+        new Date(cached.expiresAt).getTime() > Date.now();
     } catch (_) {
       return jsonResponse(
         { ok: false, error: "Invalid activation data" },
         500
       );
     }
-
-    const stillActive =
-      new Date(activation.expiresAt).getTime() > Date.now();
-
-    // Only trust the cached KV record while it's still within its
-    // window. If it looks expired, fall through to the live Polar
-    // lookup below instead of just reporting "expired" — the
-    // subscription may well have renewed and we just haven't heard
-    // about it via webhook yet.
-    if (stillActive) {
-      return activationStatusResponse(activation);
-    }
   }
 
-  // No usable KV record — ask Polar directly. Only checkout:/order:/
-  // subscription: prefixed keys and raw customer_ids/emails reach
-  // here; skip the live lookup for those internal prefixes since
-  // they're not something Polar's API can look up directly.
-  if (!activationId.startsWith("checkout:") &&
-      !activationId.startsWith("order:") &&
-      !activationId.startsWith("subscription:")) {
-    const live = await lookupActivationFromPolar(activationId, env);
-    if (live) {
-      await saveActivation(live, env);
-      return activationStatusResponse(live);
+  // Internal prefixed keys (checkout:/order:/subscription:) aren't
+  // something Polar's API can look up directly, so for those we can
+  // only ever trust the cache.
+  if (isInternalKey) {
+    if (cached && cachedStillActive) {
+      return activationStatusResponse(cached);
     }
+    return jsonResponse({
+      ok: true,
+      active: false,
+      status: "not_activated",
+      daysRemaining: 0,
+      expiresAt: "",
+    });
+  }
+
+  // For real customer_id/email keys: don't just trust a non-expired
+  // cache blindly — confirm it against Polar live first. This is what
+  // catches a customer being deleted and re-created (new customer_id)
+  // outside of any webhook. If the live check fails or Polar is
+  // unreachable, fall back to the cached record instead of reporting
+  // the user as inactive.
+  const live = await lookupActivationFromPolar(activationId, env);
+
+  if (live) {
+    if (!cached || live.customerId !== cached.customerId) {
+      await saveActivation(live, env);
+    }
+    return activationStatusResponse(live);
+  }
+
+  if (cached && cachedStillActive) {
+    return activationStatusResponse(cached);
   }
 
   return jsonResponse({
