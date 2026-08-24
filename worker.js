@@ -12,6 +12,7 @@
 //   MOTIMER_KV
 
 const SUBSCRIPTION_DAYS = 30;
+const POLAR_API_BASE = "https://api.polar.sh/v1";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -486,6 +487,19 @@ function getCustomerEmail(data) {
 // =====================================================
 // ACTIVATION STATUS
 // =====================================================
+//
+// This used to ONLY read from MOTIMER_KV, which is populated
+// exclusively by the /polar-webhook handler above. That means
+// if a webhook delivery is ever missed, arrives late, or gets
+// rejected (e.g. signature verification), the KV record never
+// exists and the extension has no way to recover — it just
+// gets "couldn't be automatically re-linked" forever, even
+// though Polar itself shows the customer as active.
+//
+// To make this resilient, if KV has no record (or an expired
+// one) we now fall back to asking Polar directly, in real time,
+// and backfill KV so future lookups are fast again.
+// =====================================================
 
 async function handleActivationStatus(
   url,
@@ -530,80 +544,159 @@ async function handleActivationStatus(
       `activation:${activationId}`
     );
 
-  if (!raw) {
-    return jsonResponse({
-      ok: true,
-      active: false,
-      status: "not_activated",
-      daysRemaining: 0,
-      expiresAt: "",
-    });
+  if (raw) {
+    let activation;
+    try {
+      activation = JSON.parse(raw);
+    } catch (_) {
+      return jsonResponse(
+        { ok: false, error: "Invalid activation data" },
+        500
+      );
+    }
+
+    const stillActive =
+      new Date(activation.expiresAt).getTime() > Date.now();
+
+    // Only trust the cached KV record while it's still within its
+    // window. If it looks expired, fall through to the live Polar
+    // lookup below instead of just reporting "expired" — the
+    // subscription may well have renewed and we just haven't heard
+    // about it via webhook yet.
+    if (stillActive) {
+      return activationStatusResponse(activation);
+    }
   }
 
-  let activation;
-
-  try {
-    activation =
-      JSON.parse(raw);
-  } catch (_) {
-    return jsonResponse(
-      {
-        ok: false,
-        error: "Invalid activation data",
-      },
-      500
-    );
+  // No usable KV record — ask Polar directly. Only checkout:/order:/
+  // subscription: prefixed keys and raw customer_ids/emails reach
+  // here; skip the live lookup for those internal prefixes since
+  // they're not something Polar's API can look up directly.
+  if (!activationId.startsWith("checkout:") &&
+      !activationId.startsWith("order:") &&
+      !activationId.startsWith("subscription:")) {
+    const live = await lookupActivationFromPolar(activationId, env);
+    if (live) {
+      await saveActivation(live, env);
+      return activationStatusResponse(live);
+    }
   }
-
-  const expires =
-    new Date(
-      activation.expiresAt
-    ).getTime();
-
-  const now =
-    Date.now();
-
-  const remainingMs =
-    expires - now;
-
-  const daysRemaining =
-    Math.max(
-      0,
-      Math.ceil(
-        remainingMs /
-          (1000 * 60 * 60 * 24)
-      )
-    );
-
-  const active =
-    remainingMs > 0;
 
   return jsonResponse({
     ok: true,
+    active: false,
+    status: "not_activated",
+    daysRemaining: 0,
+    expiresAt: "",
+  });
+}
 
+function activationStatusResponse(activation) {
+  const expires = new Date(activation.expiresAt).getTime();
+  const now = Date.now();
+  const remainingMs = expires - now;
+  const daysRemaining = Math.max(
+    0,
+    Math.ceil(remainingMs / (1000 * 60 * 60 * 24))
+  );
+  const active = remainingMs > 0;
+
+  return jsonResponse({
+    ok: true,
     active,
-
-    status:
-      active
-        ? "active"
-        : "expired",
-
+    status: active ? "active" : "expired",
     daysRemaining,
-
     // Included so the success page (which only knows the
     // checkout_id) can learn the real customer_id and hand it
     // to the extension. Non-secret: this is the same
     // customer_id Polar already shows the buyer in their own
     // account/receipt.
-    customerId:
-      activation.customerId || "",
-
-    activatedAt:
-      activation.activatedAt,
-
-    expiresAt:
-      activation.expiresAt,
+    customerId: activation.customerId || "",
+    activatedAt: activation.activatedAt,
+    expiresAt: activation.expiresAt,
   });
+}
+
+
+// =====================================================
+// LIVE POLAR LOOKUP (fallback when KV/webhook has nothing)
+// =====================================================
+//
+// activationId is either a Polar customer_id or an email
+// (lowercased). Returns an activation object shaped like the
+// ones saveActivation() writes, or null if Polar has no active
+// subscription for it.
+// =====================================================
+
+async function lookupActivationFromPolar(activationId, env) {
+  if (!env.POLAR_ACCESS_TOKEN) return null;
+
+  const isEmail = activationId.includes("@");
+  let customerId = isEmail ? "" : activationId;
+
+  try {
+    if (isEmail) {
+      const res = await fetch(
+        `${POLAR_API_BASE}/customers?email=${encodeURIComponent(activationId)}&limit=1`,
+        {
+          headers: {
+            Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`,
+          },
+        }
+      );
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => ({}));
+      const match = Array.isArray(data?.items) ? data.items[0] : null;
+      if (!match?.id) return null;
+      customerId = String(match.id);
+    }
+
+    if (!customerId) return null;
+
+    const stateRes = await fetch(
+      `${POLAR_API_BASE}/customers/${encodeURIComponent(customerId)}/state`,
+      {
+        headers: {
+          Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`,
+        },
+      }
+    );
+    if (!stateRes.ok) return null;
+    const state = await stateRes.json().catch(() => ({}));
+
+    const activeSubs = Array.isArray(state?.active_subscriptions)
+      ? state.active_subscriptions
+      : [];
+    if (activeSubs.length === 0) return null;
+
+    // Prefer the subscription with the furthest-out period end.
+    const sub = activeSubs.reduce((best, s) => {
+      const end = new Date(
+        s.current_period_end || s.ended_at || 0
+      ).getTime();
+      const bestEnd = new Date(
+        best?.current_period_end || best?.ended_at || 0
+      ).getTime();
+      return end > bestEnd ? s : best;
+    }, activeSubs[0]);
+
+    const periodStart =
+      sub.current_period_start || sub.started_at || new Date().toISOString();
+    const periodEnd =
+      sub.current_period_end || addDays(periodStart, SUBSCRIPTION_DAYS);
+
+    return {
+      ok: true,
+      subscriptionId: String(sub.id || ""),
+      customerId,
+      customerEmail: String(state?.email || activationId || "").toLowerCase(),
+      activatedAt: periodStart,
+      expiresAt: periodEnd,
+      status: "active",
+    };
+  } catch (_) {
+    return null;
+  }
 }
 
 
@@ -943,56 +1036,60 @@ async function verifyWebhookSignature(
       return false;
     }
 
-    // Polar / Standard Webhooks secret.
-    const keyBytes =
-      decodeWebhookSecret(
-        secret
-      );
+    // Polar / Standard Webhooks secret. Try every candidate key
+    // interpretation rather than betting on just one — webhook
+    // delivery silently failing (401) is exactly what caused this
+    // whole bug, so this verification must not be a single point
+    // of failure again.
+    const keyCandidates =
+      decodeWebhookSecretCandidates(secret);
 
-    if (!keyBytes) {
+    if (keyCandidates.length === 0) {
       return false;
     }
-
-    const key =
-      await crypto.subtle.importKey(
-        "raw",
-        keyBytes,
-        {
-          name: "HMAC",
-          hash: "SHA-256",
-        },
-        false,
-        ["verify"]
-      );
 
     const payloadBytes =
       new TextEncoder().encode(
         signedPayload
       );
 
-    for (
-      const signature
-      of signatures
-    ) {
-      const signatureBytes =
-        base64ToBytes(
-          signature
+    for (const keyBytes of keyCandidates) {
+      const key =
+        await crypto.subtle.importKey(
+          "raw",
+          keyBytes,
+          {
+            name: "HMAC",
+            hash: "SHA-256",
+          },
+          false,
+          ["verify"]
         );
 
-      if (!signatureBytes) {
-        continue;
-      }
+      for (
+        const signature
+        of signatures
+      ) {
+        const signatureBytes =
+          base64ToBytes(
+            signature
+          );
 
-      const valid =
-        await crypto.subtle.verify(
-          "HMAC",
-          key,
-          signatureBytes,
-          payloadBytes
-        );
+        if (!signatureBytes) {
+          continue;
+        }
 
-      if (valid) {
-        return true;
+        const valid =
+          await crypto.subtle.verify(
+            "HMAC",
+            key,
+            signatureBytes,
+            payloadBytes
+          );
+
+        if (valid) {
+          return true;
+        }
       }
     }
 
@@ -1054,41 +1151,40 @@ function parseSignatures(
 
 
 // =====================================================
-// DECODE WEBHOOK SECRET
+// DECODE WEBHOOK SECRET — candidate HMAC keys
 // =====================================================
 //
-// FIXED: Polar's docs explicitly warn that custom signature
-// verification needs the secret "base64 encoded" before
-// generating the signature — the opposite of the generic
-// Standard Webhooks spec (which base64-DECODES the secret to
-// get the raw HMAC key). In practice this means Polar expects
-// the raw UTF-8 bytes of the secret string as the HMAC key,
-// NOT a base64-decoded version of it.
+// Different implementations disagree on exactly how the
+// whsec_-prefixed secret becomes HMAC key bytes. Rather than
+// gamble on one interpretation (which is how this broke last
+// time), we try the plausible candidates in order and let
+// signature verification itself decide which one is right:
 //
-// If this still fails, try the alternate variant below that
-// keeps the "whsec_" prefix as part of the key bytes.
+//  1. Standard Webhooks spec (svix-compatible, which Polar's
+//     webhook format follows): strip "whsec_", base64-decode
+//     the rest to get the raw key bytes.
+//  2. Raw UTF-8 bytes of the secret with "whsec_" stripped.
+//  3. Raw UTF-8 bytes of the full secret string, prefix
+//     included.
 // =====================================================
 
-function decodeWebhookSecret(
-  secret
-) {
-  try {
-    const value =
-      String(secret)
-        .trim();
+function decodeWebhookSecretCandidates(secret) {
+  const value = String(secret || "").trim();
+  if (!value) return [];
 
-    if (!value) {
-      return null;
-    }
+  const withoutPrefix = value.startsWith("whsec_")
+    ? value.slice("whsec_".length)
+    : value;
 
-    // Polar signs webhooks using the RAW UTF-8 bytes of the
-    // full secret string, "whsec_" prefix included — NOT
-    // base64-decoded. Confirmed against live Polar deliveries.
-    return new TextEncoder().encode(value);
+  const candidates = [];
 
-  } catch (_) {
-    return null;
-  }
+  const base64Decoded = base64ToBytes(withoutPrefix);
+  if (base64Decoded) candidates.push(base64Decoded);
+
+  candidates.push(new TextEncoder().encode(withoutPrefix));
+  candidates.push(new TextEncoder().encode(value));
+
+  return candidates;
 }
 
 
