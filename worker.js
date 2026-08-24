@@ -24,17 +24,12 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // CORS
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
         headers: CORS_HEADERS,
       });
     }
-
-    // =================================================
-    // POLAR WEBHOOK
-    // =================================================
 
     if (
       url.pathname === "/polar-webhook" &&
@@ -43,10 +38,6 @@ export default {
       return handlePolarWebhook(request, env);
     }
 
-    // =================================================
-    // ACTIVATION STATUS
-    // =================================================
-
     if (
       url.pathname === "/activation-status" &&
       request.method === "GET"
@@ -54,20 +45,12 @@ export default {
       return handleActivationStatus(url, env);
     }
 
-    // =================================================
-    // CHECKOUT SUCCESS PAGE
-    // =================================================
-
     if (
       url.pathname === "/success" &&
       request.method === "GET"
     ) {
       return handleSuccessPage(url, env);
     }
-
-    // =================================================
-    // CUSTOMER PORTAL
-    // =================================================
 
     if (
       url.pathname === "/customer-portal" &&
@@ -93,8 +76,6 @@ export default {
 
 async function handlePolarWebhook(request, env) {
   try {
-    // IMPORTANT:
-    // Must read the exact raw body before JSON.parse().
     const body = await request.text();
 
     const webhookId =
@@ -130,7 +111,6 @@ async function handlePolarWebhook(request, env) {
       );
     }
 
-    // Verify Polar / Standard Webhooks signature.
     const valid =
       await verifyWebhookSignature(
         body,
@@ -167,17 +147,9 @@ async function handlePolarWebhook(request, env) {
     const eventType =
       getEventType(request, event);
 
-    // =================================================
-    // ORDER PAID
-    // =================================================
-
     if (eventType === "order.paid") {
       return handleOrderPaid(event, env);
     }
-
-    // =================================================
-    // SUBSCRIPTION ACTIVE
-    // =================================================
 
     if (
       eventType === "subscription.active"
@@ -188,7 +160,6 @@ async function handlePolarWebhook(request, env) {
       );
     }
 
-    // Accept other events.
     return jsonResponse({
       ok: true,
       ignored: true,
@@ -268,20 +239,6 @@ async function handleOrderPaid(event, env) {
 
     status: "active",
   };
-
-  // ---------------------------------------------------
-  // IMPORTANT FOR THE EXTENSION
-  //
-  // Extension calls:
-  //
-  // /activation-status?activation_id=<customer_id or email>
-  //
-  // Therefore we save the activation under BOTH the
-  // customer_id and the buyer's checkout email, so the
-  // extension can activate automatically using whichever
-  // identifier it already has (the Google account email
-  // it's connected to needs no manual linking step).
-  // ---------------------------------------------------
 
   if (env.MOTIMER_KV) {
     await saveActivation(
@@ -363,7 +320,6 @@ async function handleSubscriptionActive(
     status: "active",
   };
 
-  // Save under customer_id AND email so the extension can find it.
   if (env.MOTIMER_KV) {
     await saveActivation(
       activation,
@@ -402,11 +358,6 @@ async function saveActivation(
       activation
     );
 
-  // Primary key used by the extension when it already
-  // knows the Polar customer_id (manual/legacy linking):
-  //
-  // activation:<customer_id>
-  //
   if (activation.customerId) {
     await env.MOTIMER_KV.put(
       `activation:${activation.customerId}`,
@@ -414,23 +365,12 @@ async function saveActivation(
     );
   }
 
-  // Secondary key used by the extension's automatic path:
-  // it queries by the connected Google account's email,
-  // with no manual step required from the buyer as long as
-  // they check out with the same email.
-  //
-  // activation:<email, lowercased>
-  //
   if (activation.customerEmail) {
     await env.MOTIMER_KV.put(
       `activation:${activation.customerEmail.toLowerCase()}`,
       value
     );
   }
-
-  // Also save by checkout/order/subscription ID
-  // when available. This gives us useful fallback
-  // records without changing the extension API.
 
   if (activation.checkoutId) {
     await env.MOTIMER_KV.put(
@@ -484,6 +424,187 @@ function getCustomerEmail(data) {
 
 
 // =====================================================
+// LIVE POLAR CUSTOMER STATE
+// =====================================================
+
+async function getLiveCustomerState(
+  customerId,
+  env
+) {
+  try {
+    const res = await fetch(
+      `https://api.polar.sh/v1/customers/${encodeURIComponent(customerId)}/state`,
+      {
+        method: "GET",
+        headers: {
+          Authorization:
+            `Bearer ${env.POLAR_ACCESS_TOKEN}`,
+          "Content-Type":
+            "application/json",
+        },
+      }
+    );
+
+    const data =
+      await res.json().catch(
+        () => ({})
+      );
+
+    if (res.status === 404) {
+      return {
+        ok: false,
+        customerNotFound: true,
+      };
+    }
+
+    if (
+      !res.ok ||
+      !data?.id
+    ) {
+      return {
+        ok: false,
+        reason:
+          "polar_customer_state_failed",
+      };
+    }
+
+    const activeSubscriptions =
+      Array.isArray(
+        data.active_subscriptions
+      )
+        ? data.active_subscriptions
+        : [];
+
+    const subscription =
+      activeSubscriptions
+        .filter(
+          (x) =>
+            x &&
+            (
+              x.status === "active" ||
+              x.status === "trialing"
+            )
+        )
+        .sort(
+          (a, b) =>
+            String(
+              b?.current_period_end || ""
+            ).localeCompare(
+              String(
+                a?.current_period_end || ""
+              )
+            )
+        )[0];
+
+    if (
+      !subscription?.current_period_end
+    ) {
+      return {
+        ok: true,
+
+        payload: {
+          ok: true,
+          active: false,
+          status: "not_subscribed",
+          customerId,
+          daysRemaining: 0,
+          expiresAt: "",
+        },
+      };
+    }
+
+    const expiresAt =
+      String(
+        subscription.current_period_end
+      );
+
+    const remainingMs =
+      new Date(
+        expiresAt
+      ).getTime() -
+      Date.now();
+
+    const active =
+      remainingMs > 0;
+
+    const activation = {
+      ok: true,
+
+      customerId,
+
+      customerEmail:
+        String(
+          data.email || ""
+        )
+          .trim()
+          .toLowerCase(),
+
+      subscriptionId:
+        String(
+          subscription.id || ""
+        ),
+
+      activatedAt:
+        subscription.current_period_start ||
+        subscription.started_at ||
+        new Date().toISOString(),
+
+      expiresAt,
+
+      status:
+        active
+          ? "active"
+          : "expired",
+    };
+
+    if (env.MOTIMER_KV) {
+      await saveActivation(
+        activation,
+        env
+      );
+    }
+
+    return {
+      ok: true,
+
+      payload: {
+        ok: true,
+
+        active,
+
+        status:
+          active
+            ? "active"
+            : "expired",
+
+        daysRemaining:
+          Math.max(
+            0,
+            Math.ceil(
+              remainingMs /
+              (1000 * 60 * 60 * 24)
+            )
+          ),
+
+        customerId,
+
+        activatedAt:
+          activation.activatedAt,
+
+        expiresAt,
+      },
+    };
+
+  } catch (_) {
+    return {
+      ok: false,
+      reason: "network",
+    };
+  }
+}
+
+
+// =====================================================
 // ACTIVATION STATUS
 // =====================================================
 
@@ -496,13 +617,16 @@ async function handleActivationStatus(
       url.searchParams.get(
         "activation_id"
       ) || ""
-    ).trim().toLowerCase();
+    )
+      .trim()
+      .toLowerCase();
 
   if (!activationId) {
     return jsonResponse(
       {
         ok: false,
-        error: "Missing activation_id",
+        error:
+          "Missing activation_id",
       },
       400
     );
@@ -512,19 +636,143 @@ async function handleActivationStatus(
     return jsonResponse(
       {
         ok: false,
-        error: "MOTIMER_KV is not configured",
+        error:
+          "MOTIMER_KV is not configured",
       },
       500
     );
   }
 
-  // The extension passes either the Polar customer_id or the
-  // connected Google account email here — both are indexed
-  // under the same "activation:<key>" namespace by saveActivation().
-  //
-  // The success page (handleSuccessPage below) passes
-  // "checkout:<checkout_id>" instead, right after a purchase,
-  // before it knows the real customer_id yet.
+  // =================================================
+  // REAL POLAR CUSTOMER ID
+  // =================================================
+
+  if (
+    isUuid(activationId) &&
+    env.POLAR_ACCESS_TOKEN
+  ) {
+    const live =
+      await getLiveCustomerState(
+        activationId,
+        env
+      );
+
+    if (
+      live?.customerNotFound
+    ) {
+      return jsonResponse({
+        ok: true,
+
+        active: false,
+
+        status:
+          "customer_not_found",
+
+        customerId:
+          activationId,
+
+        customerNotFound:
+          true,
+
+        daysRemaining: 0,
+
+        expiresAt: "",
+      });
+    }
+
+    if (live?.ok) {
+      return jsonResponse(
+        live.payload
+      );
+    }
+
+    // Temporary Polar/API failure:
+    // use KV only as fallback.
+  }
+
+
+  // =================================================
+  // CHECKOUT RESOLUTION
+  // =================================================
+
+  if (
+    activationId.startsWith(
+      "checkout:"
+    ) &&
+    env.POLAR_ACCESS_TOKEN
+  ) {
+    const checkoutId =
+      activationId
+        .slice(
+          "checkout:".length
+        )
+        .trim();
+
+    if (checkoutId) {
+      try {
+        const res =
+          await fetch(
+            `https://api.polar.sh/v1/orders?checkout_id=${encodeURIComponent(checkoutId)}&limit=1`,
+            {
+              method: "GET",
+
+              headers: {
+                Authorization:
+                  `Bearer ${env.POLAR_ACCESS_TOKEN}`,
+
+                "Content-Type":
+                  "application/json",
+              },
+            }
+          );
+
+        const data =
+          await res.json()
+            .catch(
+              () => ({})
+            );
+
+        const order =
+          Array.isArray(
+            data?.items
+          )
+            ? data.items[0]
+            : null;
+
+        const customerId =
+          String(
+            order?.customer_id ||
+            order?.customer?.id ||
+            ""
+          ).trim();
+
+        if (
+          res.ok &&
+          customerId &&
+          isUuid(customerId)
+        ) {
+          const live =
+            await getLiveCustomerState(
+              customerId,
+              env
+            );
+
+          if (live?.ok) {
+            return jsonResponse(
+              live.payload
+            );
+          }
+        }
+
+      } catch (_) {}
+    }
+  }
+
+
+  // =================================================
+  // KV FALLBACK
+  // =================================================
+
   const raw =
     await env.MOTIMER_KV.get(
       `activation:${activationId}`
@@ -533,9 +781,14 @@ async function handleActivationStatus(
   if (!raw) {
     return jsonResponse({
       ok: true,
+
       active: false,
-      status: "not_activated",
+
+      status:
+        "not_activated",
+
       daysRemaining: 0,
+
       expiresAt: "",
     });
   }
@@ -549,7 +802,8 @@ async function handleActivationStatus(
     return jsonResponse(
       {
         ok: false,
-        error: "Invalid activation data",
+        error:
+          "Invalid activation data",
       },
       500
     );
@@ -560,18 +814,16 @@ async function handleActivationStatus(
       activation.expiresAt
     ).getTime();
 
-  const now =
-    Date.now();
-
   const remainingMs =
-    expires - now;
+    expires -
+    Date.now();
 
   const daysRemaining =
     Math.max(
       0,
       Math.ceil(
         remainingMs /
-          (1000 * 60 * 60 * 24)
+        (1000 * 60 * 60 * 24)
       )
     );
 
@@ -590,13 +842,9 @@ async function handleActivationStatus(
 
     daysRemaining,
 
-    // Included so the success page (which only knows the
-    // checkout_id) can learn the real customer_id and hand it
-    // to the extension. Non-secret: this is the same
-    // customer_id Polar already shows the buyer in their own
-    // account/receipt.
     customerId:
-      activation.customerId || "",
+      activation.customerId ||
+      "",
 
     activatedAt:
       activation.activatedAt,
@@ -607,73 +855,115 @@ async function handleActivationStatus(
 }
 
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || "")
+  );
+}
+
+
 // =====================================================
 // CUSTOMER PORTAL
 // =====================================================
-//
-// Extension calls:
-//
-//   /customer-portal?customer_id=<Polar customer_id>
-//
-// This creates a short-lived Polar customer session
-// server-side (using our secret Organization Access Token)
-// and returns the resulting customer_portal_url, which
-// already embeds a customer_session_token scoped to that
-// one customer. The extension just opens that URL in a
-// new tab — see db.js openManageSubscription().
-// =====================================================
 
-async function handleCustomerPortal(url, env) {
-  const customerId = String(
-    url.searchParams.get("customer_id") || ""
-  ).trim();
+async function handleCustomerPortal(
+  url,
+  env
+) {
+  const customerId =
+    String(
+      url.searchParams.get(
+        "customer_id"
+      ) || ""
+    ).trim();
 
   if (!customerId) {
     return jsonResponse(
-      { ok: false, error: "Missing customer_id" },
+      {
+        ok: false,
+        error:
+          "Missing customer_id",
+      },
       400
     );
   }
 
   if (!env.POLAR_ACCESS_TOKEN) {
     return jsonResponse(
-      { ok: false, error: "POLAR_ACCESS_TOKEN is not configured" },
+      {
+        ok: false,
+        error:
+          "POLAR_ACCESS_TOKEN is not configured",
+      },
       500
     );
   }
 
   try {
-    const res = await fetch(
-      "https://api.polar.sh/v1/customer-sessions/",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.POLAR_ACCESS_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ customer_id: customerId }),
-      }
-    );
+    const res =
+      await fetch(
+        "https://api.polar.sh/v1/customer-sessions/",
+        {
+          method: "POST",
 
-    const data = await res.json().catch(() => ({}));
+          headers: {
+            Authorization:
+              `Bearer ${env.POLAR_ACCESS_TOKEN}`,
 
-    if (!res.ok || !data?.customer_portal_url) {
+            "Content-Type":
+              "application/json",
+          },
+
+          body:
+            JSON.stringify({
+              customer_id:
+                customerId,
+            }),
+        }
+      );
+
+    const data =
+      await res.json()
+        .catch(
+          () => ({})
+        );
+
+    if (
+      !res.ok ||
+      !data?.customer_portal_url
+    ) {
       return jsonResponse(
         {
           ok: false,
-          error: data?.detail || "Polar API error",
+
+          error:
+            data?.detail ||
+            "Polar API error",
         },
-        res.status || 502
+
+        res.status ||
+          502
       );
     }
 
     return jsonResponse({
       ok: true,
-      url: data.customer_portal_url,
+
+      url:
+        data.customer_portal_url,
     });
+
   } catch (err) {
     return jsonResponse(
-      { ok: false, error: String(err?.message || err) },
+      {
+        ok: false,
+
+        error:
+          String(
+            err?.message ||
+            err
+          ),
+      },
       500
     );
   }
@@ -683,32 +973,26 @@ async function handleCustomerPortal(url, env) {
 // =====================================================
 // CHECKOUT SUCCESS PAGE
 // =====================================================
-//
-// Polar's Checkout Link "Success URL" should point here:
-//
-//   https://motimer-sucess.amohamedpsaad.workers.dev/success?checkout_id={CHECKOUT_ID}
-//
-// Polar substitutes {CHECKOUT_ID} automatically at redirect
-// time. This page polls our own /activation-status using
-// "checkout:<checkout_id>" (saved by saveActivation() as soon
-// as the order.paid webhook lands) until it finds the real
-// customer_id, then hands that customer_id to the extension
-// via chrome.runtime.sendMessage — matching manifest.json's
-// externally_connectable, which already allows this exact
-// Worker origin to message the extension.
-// =====================================================
 
-function handleSuccessPage(url, env) {
-  const checkoutId = String(
-    url.searchParams.get("checkout_id") || ""
-  ).trim();
+function handleSuccessPage(
+  url,
+  env
+) {
+  const checkoutId =
+    String(
+      url.searchParams.get(
+        "checkout_id"
+      ) || ""
+    ).trim();
 
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
 <title>Motimer — Payment confirmed</title>
+
 <style>
   :root{
     --ink:#0f1a13;
@@ -720,7 +1004,11 @@ function handleSuccessPage(url, env) {
     --green-deep:#0f6b3a;
     --green-soft:#e6f6ec;
   }
-  *{box-sizing:border-box}
+
+  *{
+    box-sizing:border-box
+  }
+
   body{
     margin:0;
     min-height:100vh;
@@ -730,8 +1018,16 @@ function handleSuccessPage(url, env) {
     padding:24px;
     background:var(--paper);
     color:var(--ink);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Arial,sans-serif;
+    font-family:
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      Inter,
+      Roboto,
+      Arial,
+      sans-serif;
   }
+
   .card{
     width:100%;
     max-width:380px;
@@ -740,8 +1036,13 @@ function handleSuccessPage(url, env) {
     border-radius:16px;
     padding:36px 32px 28px;
     text-align:center;
-    box-shadow:0 1px 2px rgba(15,26,19,0.04), 0 12px 28px -16px rgba(15,26,19,0.12);
+    box-shadow:
+      0 1px 2px
+      rgba(15,26,19,0.04),
+      0 12px 28px -16px
+      rgba(15,26,19,0.12);
   }
+
   .check{
     width:52px;
     height:52px;
@@ -752,19 +1053,26 @@ function handleSuccessPage(url, env) {
     align-items:center;
     justify-content:center;
   }
-  .check svg{ width:24px; height:24px; }
+
+  .check svg{
+    width:24px;
+    height:24px;
+  }
+
   h1{
     font-size:19px;
     font-weight:650;
     letter-spacing:-0.01em;
     margin:0 0 8px;
   }
+
   p{
     margin:0;
     color:var(--muted);
     font-size:14.5px;
     line-height:1.55;
   }
+
   .cta{
     margin-top:24px;
     width:100%;
@@ -783,7 +1091,11 @@ function handleSuccessPage(url, env) {
     transition:background .15s ease;
     text-decoration:none;
   }
-  .cta:hover{ background:var(--green-deep); }
+
+  .cta:hover{
+    background:var(--green-deep);
+  }
+
   .brand{
     margin-top:24px;
     padding-top:18px;
@@ -791,101 +1103,203 @@ function handleSuccessPage(url, env) {
     font-size:12px;
     color:#9aa79f;
   }
-  .brand b{ color:var(--muted); font-weight:600; }
+
+  .brand b{
+    color:var(--muted);
+    font-weight:600;
+  }
 </style>
+
 </head>
+
 <body>
+
 <div class="card">
+
   <div class="check">
-    <svg viewBox="0 0 24 24" fill="none">
-      <path d="M4 12.5L9.5 18L20 6" stroke="#178a4c" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <path
+        d="M4 12.5L9.5 18L20 6"
+        stroke="#178a4c"
+        stroke-width="2.6"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
     </svg>
+
   </div>
-  <h1>Payment confirmed</h1>
-  <p>Your Motimer subscription is active.</p>
-  <button class="cta" id="ctaBtn" type="button">Go to dashboard →</button>
-  <div class="brand"><b>Motimer</b> · secure checkout via Polar</div>
+
+  <h1>
+    Payment confirmed
+  </h1>
+
+  <p>
+    Your Motimer subscription is active.
+  </p>
+
+  <button
+    class="cta"
+    id="ctaBtn"
+    type="button"
+  >
+    Go to dashboard →
+  </button>
+
+  <div class="brand">
+    <b>Motimer</b>
+    · secure checkout via Polar
+  </div>
+
 </div>
+
 <script>
 (function(){
-  const EXTENSION_ID = "aniinmakekcefcjkmlgkhmmfdghfngge";
-  const checkoutId = ${JSON.stringify(checkoutId)};
+
+  const EXTENSION_ID =
+    "aniinmakekcefcjkmlgkhmmfdghfngge";
+
+  const checkoutId =
+    ${JSON.stringify(checkoutId)};
+
 
   function openDashboard() {
-    window.open("chrome-extension://" + EXTENSION_ID + "/db.html", "_blank");
+
+    window.open(
+      "chrome-extension://" +
+      EXTENSION_ID +
+      "/db.html",
+      "_blank"
+    );
+
   }
 
-  document.getElementById("ctaBtn").addEventListener("click", openDashboard);
 
-  // Quietly try to hand the customer ID to the extension in the
-  // background — no loading state, doesn't block the page.
-  function sendToExtension(customerId) {
-    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) return;
-    chrome.runtime.sendMessage(EXTENSION_ID, { type: "MOTIMER_ACTIVATE_LICENSE", customerId: customerId });
+  document
+    .getElementById("ctaBtn")
+    .addEventListener(
+      "click",
+      openDashboard
+    );
+
+
+  function sendToExtension(
+    customerId
+  ) {
+
+    if (
+      typeof chrome === "undefined" ||
+      !chrome.runtime ||
+      !chrome.runtime.sendMessage
+    ) {
+      return;
+    }
+
+    chrome.runtime.sendMessage(
+      EXTENSION_ID,
+      {
+        type:
+          "MOTIMER_ACTIVATE_LICENSE",
+
+        customerId:
+          customerId
+      }
+    );
+
   }
 
-  async function tryActivate(attempt) {
-    if (!checkoutId || attempt >= 3) return;
+
+  async function tryActivate(
+    attempt
+  ) {
+
+    if (
+      !checkoutId ||
+      attempt >= 30
+    ) {
+      return;
+    }
+
     try {
-      const res = await fetch("/activation-status?activation_id=" + encodeURIComponent("checkout:" + checkoutId), { cache: "no-store" });
-      const json = await res.json().catch(function(){ return {}; });
-      if (json && json.ok && json.customerId) {
-        sendToExtension(json.customerId);
+
+      const res =
+        await fetch(
+          "/activation-status?activation_id=" +
+          encodeURIComponent(
+            "checkout:" +
+            checkoutId
+          ),
+          {
+            cache:
+              "no-store"
+          }
+        );
+
+      const json =
+        await res
+          .json()
+          .catch(
+            function(){
+              return {};
+            }
+          );
+
+      if (
+        json &&
+        json.ok &&
+        json.customerId
+      ) {
+
+        sendToExtension(
+          json.customerId
+        );
+
         return;
       }
+
     } catch (e) {}
-    setTimeout(function () { tryActivate(attempt + 1); }, 900);
+
+    setTimeout(
+      function(){
+        tryActivate(
+          attempt + 1
+        );
+      },
+      1000
+    );
+
   }
 
+
   tryActivate(0);
+
 })();
 </script>
+
 </body>
 </html>`;
 
-  return new Response(html, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      ...CORS_HEADERS,
-    },
-  });
+  return new Response(
+    html,
+    {
+      status:200,
+
+      headers:{
+        "Content-Type":
+          "text/html; charset=utf-8",
+
+        ...CORS_HEADERS,
+      },
+    }
+  );
 }
 
 
 // =====================================================
 // POLAR WEBHOOK SIGNATURE
-// =====================================================
-//
-// Headers:
-//
-//   webhook-id
-//   webhook-timestamp
-//   webhook-signature
-//
-// Signed content:
-//
-//   webhook-id + "." +
-//   webhook-timestamp + "." +
-//   rawBody
-//
-// Secret normally looks like:
-//
-//   whsec_xxxxxxxxx
-//
-// Signature normally looks like:
-//
-//   v1,xxxxxxxx
-//
-// NOTE (Polar-specific quirk):
-// Polar's own docs warn that rolling your own verification
-// needs the secret "base64 encoded" before generating the
-// signature — unlike the generic Standard Webhooks spec,
-// where the whsec_-prefixed secret is ALREADY base64 and
-// gets base64-DECODED to obtain the raw HMAC key bytes.
-// For Polar, the safe approach is to use the secret's raw
-// UTF-8 bytes directly as the HMAC key (see
-// decodeWebhookSecret below) instead of base64-decoding it.
 // =====================================================
 
 const WEBHOOK_TIMESTAMP_TOLERANCE =
@@ -899,7 +1313,9 @@ async function verifyWebhookSignature(
   signatureHeader,
   secret
 ) {
+
   try {
+
     const timestampNumber =
       Number(timestamp);
 
@@ -911,7 +1327,6 @@ async function verifyWebhookSignature(
       return false;
     }
 
-    // Protect against replayed webhooks.
     const now =
       Math.floor(
         Date.now() / 1000
@@ -919,7 +1334,8 @@ async function verifyWebhookSignature(
 
     const age =
       Math.abs(
-        now - timestampNumber
+        now -
+        timestampNumber
       );
 
     if (
@@ -943,7 +1359,6 @@ async function verifyWebhookSignature(
       return false;
     }
 
-    // Polar / Standard Webhooks secret.
     const keyBytes =
       decodeWebhookSecret(
         secret
@@ -958,28 +1373,32 @@ async function verifyWebhookSignature(
         "raw",
         keyBytes,
         {
-          name: "HMAC",
-          hash: "SHA-256",
+          name:"HMAC",
+          hash:"SHA-256",
         },
         false,
         ["verify"]
       );
 
     const payloadBytes =
-      new TextEncoder().encode(
-        signedPayload
-      );
+      new TextEncoder()
+        .encode(
+          signedPayload
+        );
 
     for (
       const signature
       of signatures
     ) {
+
       const signatureBytes =
         base64ToBytes(
           signature
         );
 
-      if (!signatureBytes) {
+      if (
+        !signatureBytes
+      ) {
         continue;
       }
 
@@ -994,12 +1413,15 @@ async function verifyWebhookSignature(
       if (valid) {
         return true;
       }
+
     }
 
     return false;
 
   } catch (_) {
+
     return false;
+
   }
 }
 
@@ -1011,6 +1433,7 @@ async function verifyWebhookSignature(
 function parseSignatures(
   header
 ) {
+
   const result = [];
 
   const parts =
@@ -1022,21 +1445,29 @@ function parseSignatures(
     const part
     of parts
   ) {
+
     const comma =
       part.indexOf(",");
 
-    if (comma === -1) {
+    if (
+      comma === -1
+    ) {
       continue;
     }
 
     const version =
       part
-        .slice(0, comma)
+        .slice(
+          0,
+          comma
+        )
         .trim();
 
     const signature =
       part
-        .slice(comma + 1)
+        .slice(
+          comma + 1
+        )
         .trim();
 
     if (
@@ -1047,6 +1478,7 @@ function parseSignatures(
         signature
       );
     }
+
   }
 
   return result;
@@ -1056,23 +1488,13 @@ function parseSignatures(
 // =====================================================
 // DECODE WEBHOOK SECRET
 // =====================================================
-//
-// FIXED: Polar's docs explicitly warn that custom signature
-// verification needs the secret "base64 encoded" before
-// generating the signature — the opposite of the generic
-// Standard Webhooks spec (which base64-DECODES the secret to
-// get the raw HMAC key). In practice this means Polar expects
-// the raw UTF-8 bytes of the secret string as the HMAC key,
-// NOT a base64-decoded version of it.
-//
-// If this still fails, try the alternate variant below that
-// keeps the "whsec_" prefix as part of the key bytes.
-// =====================================================
 
 function decodeWebhookSecret(
   secret
 ) {
+
   try {
+
     const value =
       String(secret)
         .trim();
@@ -1081,13 +1503,13 @@ function decodeWebhookSecret(
       return null;
     }
 
-    // Polar signs webhooks using the RAW UTF-8 bytes of the
-    // full secret string, "whsec_" prefix included — NOT
-    // base64-decoded. Confirmed against live Polar deliveries.
-    return new TextEncoder().encode(value);
+    return new TextEncoder()
+      .encode(value);
 
   } catch (_) {
+
     return null;
+
   }
 }
 
@@ -1099,7 +1521,9 @@ function decodeWebhookSecret(
 function base64ToBytes(
   value
 ) {
+
   try {
+
     const binary =
       atob(
         String(value)
@@ -1116,14 +1540,18 @@ function base64ToBytes(
       i < binary.length;
       i++
     ) {
+
       bytes[i] =
         binary.charCodeAt(i);
+
     }
 
     return bytes;
 
   } catch (_) {
+
     return null;
+
   }
 }
 
@@ -1136,6 +1564,7 @@ function getEventType(
   request,
   event
 ) {
+
   return String(
     event?.type ||
     event?.event ||
@@ -1147,6 +1576,7 @@ function getEventType(
     ) ||
     ""
   );
+
 }
 
 
@@ -1158,6 +1588,7 @@ function addDays(
   isoDate,
   days
 ) {
+
   const date =
     new Date(
       isoDate
@@ -1165,12 +1596,12 @@ function addDays(
 
   date.setTime(
     date.getTime() +
-      days *
-        24 *
-        60 *
-        60 *
-        1000
-    );
+    days *
+    24 *
+    60 *
+    60 *
+    1000
+  );
 
   return date.toISOString();
 }
@@ -1184,6 +1615,7 @@ function jsonResponse(
   data,
   status = 200
 ) {
+
   return new Response(
     JSON.stringify(data),
     {
@@ -1197,4 +1629,5 @@ function jsonResponse(
       },
     }
   );
+
 }
